@@ -1,9 +1,9 @@
-import { collection, getDocs, doc, setDoc, deleteDoc, onSnapshot, orderBy, query, serverTimestamp, Unsubscribe } from 'firebase/firestore';
+import { collection, getDocs, addDoc, doc, setDoc, deleteDoc, onSnapshot, orderBy, query, where, serverTimestamp, Unsubscribe } from 'firebase/firestore';
 import { ref, getDownloadURL } from 'firebase/storage';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db, storage } from './firebase-config';
 import { getCurrentUser } from './auth';
-import type { Recipe, RecipeReview, ArchiveImage } from './types';
+import type { Recipe, RecipeReview, RecipeEvent, ArchiveImage } from './types';
 
 const functions = getFunctions();
 const urlCache = new Map<string, string>();
@@ -61,10 +61,50 @@ export async function setReview(recipeId: string, status: 'approved' | 'flagged'
         reviewedBy: user.email,
         reviewedAt: serverTimestamp(),
     }, { merge: true });
+    // Log event
+    await addDoc(collection(db, 'recipe-events'), {
+        recipeId,
+        type: status,
+        by: user.email,
+        at: serverTimestamp(),
+        notes: notes || undefined,
+    });
 }
 
 export async function clearReview(recipeId: string) {
     await deleteDoc(doc(db, 'recipe-reviews', recipeId));
+}
+
+export async function addFeedback(recipeId: string, text: string) {
+    const user = getCurrentUser();
+    if (!user?.email || !text.trim()) return;
+    await addDoc(collection(db, 'recipe-events'), {
+        recipeId,
+        type: 'feedback',
+        by: user.email,
+        at: serverTimestamp(),
+        feedback: text.trim(),
+    });
+}
+
+export async function loadRecipeEvents(recipeId: string): Promise<RecipeEvent[]> {
+    const q = query(collection(db, 'recipe-events'), where('recipeId', '==', recipeId), orderBy('at', 'asc'));
+    const snap = await getDocs(q);
+    return snap.docs.map(d => {
+        const data = d.data();
+        return {
+            id: d.id,
+            recipeId: data.recipeId,
+            type: data.type,
+            by: data.by || '',
+            at: data.at?.toDate() || new Date(),
+            prompt: data.prompt,
+            feedback: data.feedback,
+            notes: data.notes,
+            imageUrl: data.imageUrl,
+            archivePath: data.archivePath,
+        };
+    });
 }
 
 export function subscribeToReviews(callback: (reviews: Map<string, RecipeReview>) => void): Unsubscribe {

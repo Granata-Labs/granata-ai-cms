@@ -44,4 +44,17 @@ export interface ArchiveImage {
     timestamp: string;
 }
 
+export interface RecipeEvent {
+    id: string;
+    recipeId: string;
+    type: 'generated' | 'approved' | 'flagged' | 'feedback' | 'assigned-archive';
+    by: string;
+    at: Date;
+    prompt?: string;
+    feedback?: string;
+    notes?: string;
+    imageUrl?: string;
+    archivePath?: string;
+}
+
 export type FilterType = 'all' | 'approved' | 'flagged' | 'not-reviewed';
