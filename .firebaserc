@@ -1,0 +1,13 @@
+{
+  "projects": {
+    "default": "granata-ai"
+  },
+  "targets": {
+    "granata-ai": {
+      "hosting": {
+        "prod": ["granata-ai"],
+        "staging": ["staging-granata-ai"]
+      }
+    }
+  }
+}

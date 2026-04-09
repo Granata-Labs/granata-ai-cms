@@ -1,0 +1,19 @@
+{
+  "name": "granata-ai-cms",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "deploy:staging": "npm run build && firebase deploy --only hosting:staging",
+    "deploy:prod": "npm run build && firebase deploy --only hosting:prod"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.2",
+    "firebase": "^12.11.0",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.7"
+  }
+}
