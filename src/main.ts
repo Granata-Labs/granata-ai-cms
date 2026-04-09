@@ -1,7 +1,7 @@
 import './style.css';
 import { initAuth, setAuthChangeHandler, signInWithGoogle, logOut, getCurrentUser } from './auth';
-import { loadRecipes, subscribeToReviews, setReview, clearReview, getImageUrl, getArchiveImageUrl } from './firestore';
-import type { Recipe, RecipeReview, FilterType } from './types';
+import { loadRecipes, subscribeToReviews, setReview, clearReview, getImageUrl, getArchiveImageUrl, regenRecipeImage, listArchiveImages, assignArchiveImage } from './firestore';
+import type { Recipe, RecipeReview, FilterType, ArchiveImage } from './types';
 import type { User } from 'firebase/auth';
 
 let recipes: Recipe[] = [];
@@ -10,26 +10,49 @@ let filteredRecipes: Recipe[] = [];
 let currentFilter: FilterType = 'all';
 let searchQuery = '';
 let currentModalIndex = -1;
+let isGenerating = false;
 
 const app = document.getElementById('app')!;
 
-// Auth change handler
 setAuthChangeHandler((user: User | null) => {
-    if (user) {
-        renderApp();
-        loadData();
+    if (user) { renderApp(); loadData(); }
+    else { renderLogin(); }
+});
+initAuth();
+
+// Handle browser back/forward
+window.addEventListener('popstate', () => {
+    const id = getRecipeIdFromUrl();
+    if (id && recipes.length) {
+        const idx = filteredRecipes.findIndex(r => r.id === id);
+        if (idx >= 0) openModal(idx);
+        else { const allIdx = recipes.findIndex(r => r.id === id); if (allIdx >= 0) { currentFilter = 'all'; renderFilters(); renderGrid(); openModal(filteredRecipes.findIndex(r => r.id === id)); } }
     } else {
-        renderLogin();
+        closeModal();
     }
 });
 
-initAuth();
+function getRecipeIdFromUrl(): string | null {
+    const path = window.location.pathname;
+    const match = path.match(/^\/recipe\/(.+)$/);
+    return match ? match[1] : null;
+}
+
+function pushRecipeUrl(recipeId: string) {
+    history.pushState({ recipeId }, '', `/recipe/${recipeId}`);
+}
+
+function popRecipeUrl() {
+    if (window.location.pathname.startsWith('/recipe/')) {
+        history.pushState({}, '', '/');
+    }
+}
 
 function renderLogin() {
     app.innerHTML = `
         <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-gray-900 to-gray-800">
             <div class="bg-white rounded-2xl shadow-2xl p-8 max-w-sm w-full mx-4 text-center">
-                <div class="text-4xl mb-4">🍽</div>
+                <img src="/icon-192.png" alt="Granata AI" class="w-16 h-16 rounded-2xl mx-auto mb-4">
                 <h1 class="text-2xl font-bold text-gray-900 mb-2">Granata AI CMS</h1>
                 <p class="text-gray-500 text-sm mb-6">Recipe image review & management</p>
                 <button id="google-signin" class="w-full flex items-center justify-center gap-3 px-4 py-3 bg-white border-2 border-gray-200 rounded-xl hover:bg-gray-50 hover:border-gray-300 transition-all font-medium text-gray-700">
@@ -46,18 +69,21 @@ function renderLogin() {
 function renderApp() {
     const user = getCurrentUser()!;
     app.innerHTML = `
-        <!-- Header -->
         <header class="bg-white border-b border-gray-200 sticky top-0 z-40">
             <div class="max-w-7xl mx-auto px-4 py-3">
                 <div class="flex items-center justify-between">
                     <div class="flex items-center gap-3">
-                        <span class="text-xl">🍽</span>
+                        <img src="/icon-192.png" alt="" class="w-8 h-8 rounded-lg">
                         <div>
                             <h1 class="text-lg font-bold text-gray-900 leading-tight">Granata AI CMS</h1>
                             <p class="text-xs text-gray-400" id="subtitle">Loading recipes...</p>
                         </div>
                     </div>
                     <div class="flex items-center gap-2">
+                        <a href="https://replicate.com/account/billing" target="_blank" class="hidden sm:flex items-center gap-1 px-2 py-1 text-xs bg-purple-50 text-purple-700 rounded-lg hover:bg-purple-100">
+                            <span>~$0.04/img</span>
+                            <span class="text-purple-400">| Add Credits</span>
+                        </a>
                         <div class="hidden sm:flex gap-1">
                             <button id="export-flagged" class="px-2 py-1 text-xs bg-red-50 text-red-700 rounded-lg hover:bg-red-100">Export Flagged</button>
                             <button id="export-approved" class="px-2 py-1 text-xs bg-green-50 text-green-700 rounded-lg hover:bg-green-100">Export Approved</button>
@@ -76,95 +102,105 @@ function renderApp() {
                 </div>
             </div>
         </header>
-        <!-- Grid -->
         <main class="max-w-7xl mx-auto px-4 py-4">
             <div id="grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3"></div>
         </main>
-        <!-- Modal -->
         <div id="modal" class="fixed inset-0 z-50 hidden">
             <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" id="modal-backdrop"></div>
             <div class="absolute inset-0 sm:inset-3 md:inset-6 lg:inset-8 bg-white sm:rounded-2xl overflow-hidden flex flex-col z-10">
                 <div class="flex items-center justify-between px-4 py-3 border-b border-gray-200 shrink-0">
                     <div class="flex items-center gap-2">
-                        <button id="prev-btn" class="px-2 py-1 rounded-lg text-xs bg-gray-100 hover:bg-gray-200">&larr;</button>
-                        <h2 id="modal-title" class="text-base font-bold truncate max-w-[50vw]"></h2>
+                        <h2 id="modal-title" class="text-base font-bold truncate max-w-[60vw]"></h2>
                         <span id="modal-counter" class="text-xs text-gray-400 shrink-0"></span>
                     </div>
-                    <div class="flex items-center gap-2">
-                        <button id="next-btn" class="px-2 py-1 rounded-lg text-xs bg-gray-100 hover:bg-gray-200">&rarr;</button>
-                        <button id="close-modal" class="text-gray-400 hover:text-gray-600 text-xl ml-1">&times;</button>
-                    </div>
+                    <button id="close-modal" class="text-gray-400 hover:text-gray-600 text-xl">&times;</button>
                 </div>
-                <div id="modal-content" class="flex-1 overflow-y-auto px-4 py-4"></div>
+                <div class="flex-1 overflow-y-auto relative">
+                    <!-- Floating nav arrows -->
+                    <button id="prev-btn" class="absolute left-2 top-1/3 z-10 w-10 h-10 rounded-full bg-white/90 shadow-lg border border-gray-200 flex items-center justify-center text-gray-600 hover:bg-gray-100">&larr;</button>
+                    <button id="next-btn" class="absolute right-2 top-1/3 z-10 w-10 h-10 rounded-full bg-white/90 shadow-lg border border-gray-200 flex items-center justify-center text-gray-600 hover:bg-gray-100">&rarr;</button>
+                    <div id="modal-content" class="px-4 py-4"></div>
+                </div>
             </div>
         </div>
     `;
-
-    // Event listeners
     document.getElementById('signout-btn')?.addEventListener('click', logOut);
     document.getElementById('export-flagged')?.addEventListener('click', exportFlagged);
     document.getElementById('export-approved')?.addEventListener('click', exportApproved);
-    document.getElementById('search')?.addEventListener('input', (e) => {
-        searchQuery = (e.target as HTMLInputElement).value.toLowerCase();
-        renderGrid();
-    });
+    document.getElementById('search')?.addEventListener('input', (e) => { searchQuery = (e.target as HTMLInputElement).value.toLowerCase(); renderGrid(); });
     document.getElementById('modal-backdrop')?.addEventListener('click', closeModal);
     document.getElementById('close-modal')?.addEventListener('click', closeModal);
-    document.getElementById('prev-btn')?.addEventListener('click', () => navigateModal(-1));
-    document.getElementById('next-btn')?.addEventListener('click', () => navigateModal(1));
-
+    // Nav arrows are inside the modal scroll area — bind via delegation
+    document.getElementById('modal')?.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        if (target.id === 'prev-btn' || target.closest('#prev-btn')) navigateModal(-1);
+        if (target.id === 'next-btn' || target.closest('#next-btn')) navigateModal(1);
+    });
     renderFilters();
 }
 
 async function loadData() {
+    // Show loading skeleton immediately
+    const grid = document.getElementById('grid')!;
+    grid.innerHTML = Array(12).fill(0).map(() => `
+        <div class="bg-white rounded-xl overflow-hidden border border-gray-200 animate-pulse">
+            <div class="aspect-[3/2] bg-gray-200"></div>
+            <div class="p-3 space-y-2">
+                <div class="h-4 bg-gray-200 rounded w-3/4"></div>
+                <div class="h-3 bg-gray-100 rounded w-full"></div>
+            </div>
+        </div>
+    `).join('');
+
+    // Start loading reviews immediately (parallel with recipes)
+    const reviewsReady = new Promise<void>(resolve => {
+        subscribeToReviews((r) => { reviews = r; renderStats(); if (recipes.length) renderGrid(); resolve(); });
+    });
+
+    // Load recipes
     recipes = await loadRecipes();
     document.getElementById('subtitle')!.textContent = `${recipes.length} recipes`;
-    subscribeToReviews((r) => {
-        reviews = r;
-        renderStats();
-        renderGrid();
-    });
     renderStats();
     renderGrid();
+
+    await reviewsReady;
+
+    // Open deep-linked recipe if URL has /recipe/{id}
+    const deepLinkId = getRecipeIdFromUrl();
+    if (deepLinkId) {
+        const idx = filteredRecipes.findIndex(r => r.id === deepLinkId);
+        if (idx >= 0) openModal(idx);
+    }
 }
 
 function renderStats() {
     const total = recipes.length;
     const approved = recipes.filter(r => reviews.get(r.id)?.status === 'approved').length;
     const flagged = recipes.filter(r => reviews.get(r.id)?.status === 'flagged').length;
-    const notReviewed = total - approved - flagged;
-
     document.getElementById('stats')!.innerHTML = `
         <span class="text-gray-500"><strong>${total}</strong> Total</span>
         <span class="text-green-600"><strong>${approved}</strong> Approved</span>
         <span class="text-red-600"><strong>${flagged}</strong> Flagged</span>
-        <span class="text-amber-600"><strong>${notReviewed}</strong> Pending</span>
+        <span class="text-amber-600"><strong>${total - approved - flagged}</strong> Pending</span>
     `;
 }
 
 function renderFilters() {
     const filters: { key: FilterType; label: string }[] = [
-        { key: 'all', label: 'All' },
-        { key: 'approved', label: 'Approved' },
-        { key: 'flagged', label: 'Flagged' },
-        { key: 'not-reviewed', label: 'Pending' },
+        { key: 'all', label: 'All' }, { key: 'approved', label: 'Approved' },
+        { key: 'flagged', label: 'Flagged' }, { key: 'not-reviewed', label: 'Pending' },
     ];
     document.getElementById('filter-buttons')!.innerHTML = filters.map(f => `
         <button data-filter="${f.key}" class="filter-btn px-3 py-1 rounded-full text-xs font-medium ${f.key === currentFilter ? 'bg-gray-900 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}">${f.label}</button>
     `).join('');
     document.querySelectorAll('.filter-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            currentFilter = (btn as HTMLElement).dataset.filter as FilterType;
-            renderFilters();
-            renderGrid();
-        });
+        btn.addEventListener('click', () => { currentFilter = (btn as HTMLElement).dataset.filter as FilterType; renderFilters(); renderGrid(); });
     });
 }
 
 function matchesFilter(recipe: Recipe): boolean {
     const review = reviews.get(recipe.id);
     switch (currentFilter) {
-        case 'all': return true;
         case 'approved': return review?.status === 'approved';
         case 'flagged': return review?.status === 'flagged';
         case 'not-reviewed': return !review;
@@ -176,24 +212,21 @@ function renderGrid() {
     const filtered = recipes.filter(r => matchesFilter(r) && r.name.toLowerCase().includes(searchQuery));
     filteredRecipes = filtered;
     const grid = document.getElementById('grid')!;
-
-    if (filtered.length === 0) {
-        grid.innerHTML = '<p class="text-gray-400 col-span-full text-center py-16">No recipes match this filter.</p>';
-        return;
-    }
+    if (!filtered.length) { grid.innerHTML = '<p class="text-gray-400 col-span-full text-center py-16">No recipes match.</p>'; return; }
 
     grid.innerHTML = filtered.map((r, idx) => {
-        const review = reviews.get(r.id);
         const coverAsset = r.assets.find(a => a.context === 'cover');
+        const review = reviews.get(r.id);
         const isApproved = review?.status === 'approved';
         const isFlagged = review?.status === 'flagged';
-
+        const reviewer = review?.reviewedBy?.split('@')[0] || '';
+        const generator = review?.generatedBy?.split('@')[0] || '';
         let badgeHtml = '';
-        if (isApproved) badgeHtml = '<span class="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-blue-100 text-blue-700">APPROVED</span>';
-        else if (isFlagged) badgeHtml = '<span class="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-700">FLAGGED</span>';
+        if (isApproved) badgeHtml = `<span class="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-green-100 text-green-700" title="by ${reviewer}">APPROVED</span>`;
+        else if (isFlagged) badgeHtml = `<span class="inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-100 text-red-700" title="by ${reviewer}">FLAGGED</span>`;
 
         return `
-            <div class="bg-white rounded-xl overflow-hidden border border-gray-200 hover:shadow-lg transition-shadow" data-idx="${idx}">
+            <div class="bg-white rounded-xl overflow-hidden border border-gray-200 hover:shadow-lg transition-shadow">
                 <div class="cursor-pointer recipe-card-click" data-idx="${idx}">
                     <div class="aspect-[3/2] bg-gray-100 overflow-hidden">
                         ${coverAsset ? `<img data-cover-path="${coverAsset.url}" alt="${r.name}" class="w-full h-full object-cover lazy-img" loading="lazy">` : '<div class="flex items-center justify-center h-full text-gray-300 text-sm">No image</div>'}
@@ -208,47 +241,43 @@ function renderGrid() {
                 </div>
                 <div class="px-3 pb-3 pt-1 flex gap-2">
                     <button class="approve-btn flex-1 py-1.5 rounded-lg text-xs font-medium ${isApproved ? 'bg-green-600 text-white' : 'bg-green-50 text-green-700 hover:bg-green-100'}" data-id="${r.id}">
-                        ${isApproved ? 'Approved' : 'Approve'}
+                        ${isApproved ? `${reviewer}` : 'Approve'}
                     </button>
                     <button class="flag-btn flex-1 py-1.5 rounded-lg text-xs font-medium ${isFlagged ? 'bg-red-600 text-white' : 'bg-red-50 text-red-700 hover:bg-red-100'}" data-id="${r.id}">
-                        ${isFlagged ? 'Flagged' : 'Flag'}
+                        ${isFlagged ? `${reviewer}` : 'Flag'}
                     </button>
                 </div>
-            </div>
-        `;
+                ${generator ? `<p class="px-3 pb-2 text-[10px] text-gray-400">Generated by ${generator}</p>` : ''}
+            </div>`;
     }).join('');
 
-    // Load images lazily via Storage SDK
-    document.querySelectorAll('.lazy-img').forEach(async (img) => {
-        const path = (img as HTMLElement).dataset.coverPath;
-        if (path) {
-            const url = await getImageUrl(path);
-            if (url) (img as HTMLImageElement).src = url;
-        }
-    });
+    // Lazy load images using IntersectionObserver — only fetch when visible
+    const observer = new IntersectionObserver((entries) => {
+        entries.forEach(async (entry) => {
+            if (!entry.isIntersecting) return;
+            const img = entry.target as HTMLImageElement;
+            const path = img.dataset.coverPath;
+            if (path && !img.src) {
+                observer.unobserve(img);
+                const url = await getImageUrl(path);
+                if (url) img.src = url;
+            }
+        });
+    }, { rootMargin: '200px' }); // preload 200px before entering viewport
 
-    // Card click → open modal
+    document.querySelectorAll('.lazy-img').forEach(img => observer.observe(img));
     document.querySelectorAll('.recipe-card-click').forEach(el => {
-        el.addEventListener('click', () => {
-            const idx = parseInt((el as HTMLElement).dataset.idx!);
-            openModal(idx);
-        });
+        el.addEventListener('click', () => openModal(parseInt((el as HTMLElement).dataset.idx!)));
     });
-
-    // Approve/Flag buttons on cards
     document.querySelectorAll('.approve-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            setReview((btn as HTMLElement).dataset.id!, 'approved');
-        });
+        btn.addEventListener('click', (e) => { e.stopPropagation(); setReview((btn as HTMLElement).dataset.id!, 'approved'); });
     });
     document.querySelectorAll('.flag-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
-            const id = (btn as HTMLElement).dataset.id!;
             const notes = prompt('Regen notes (optional):');
             if (notes === null) return;
-            setReview(id, 'flagged', notes);
+            setReview((btn as HTMLElement).dataset.id!, 'flagged', notes);
         });
     });
 }
@@ -263,25 +292,29 @@ async function openModal(idx: number) {
     document.body.style.overflow = 'hidden';
     document.getElementById('modal-title')!.textContent = r.name;
     document.getElementById('modal-counter')!.textContent = `${idx + 1} of ${filteredRecipes.length}`;
+    pushRecipeUrl(r.id);
 
     const prevBtn = document.getElementById('prev-btn') as HTMLButtonElement;
     const nextBtn = document.getElementById('next-btn') as HTMLButtonElement;
-    prevBtn.disabled = idx <= 0;
-    nextBtn.disabled = idx >= filteredRecipes.length - 1;
+    prevBtn.disabled = idx <= 0; nextBtn.disabled = idx >= filteredRecipes.length - 1;
     prevBtn.style.opacity = idx <= 0 ? '0.3' : '1';
     nextBtn.style.opacity = idx >= filteredRecipes.length - 1 ? '0.3' : '1';
 
     const coverAsset = r.assets.find(a => a.context === 'cover');
     const coverPath = coverAsset?.url || '';
+    const prevFeedback = review?.feedback || '';
+    const reviewer = review?.reviewedBy?.split('@')[0] || '';
+    const generator = review?.generatedBy?.split('@')[0] || '';
 
     const content = document.getElementById('modal-content')!;
     content.innerHTML = `
         <div class="space-y-5 max-w-4xl mx-auto">
+            <!-- Meta -->
             <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
                 <div><span class="text-gray-400 text-xs">ID</span><br><code class="text-xs break-all">${r.id}</code></div>
                 <div><span class="text-gray-400 text-xs">Protein</span><br><strong>${r.proteinName || 'N/A'}</strong></div>
                 <div><span class="text-gray-400 text-xs">Calories</span><br><strong>${r.calories || 'N/A'}</strong></div>
-                <div><span class="text-gray-400 text-xs">Review</span><br><strong>${review ? review.status + ' by ' + review.reviewedBy?.split('@')[0] : 'Not reviewed'}</strong></div>
+                <div><span class="text-gray-400 text-xs">Status</span><br><strong>${review ? `${review.status} by ${reviewer}` : 'Not reviewed'}</strong>${generator ? `<br><span class="text-gray-400 text-[10px]">Generated by ${generator}</span>` : ''}</div>
             </div>
             <p class="text-gray-600 text-sm">${r.description}</p>
 
@@ -295,23 +328,52 @@ async function openModal(idx: number) {
                     </div>
                     <div>
                         <p class="text-xs text-gray-400 mb-1 font-medium uppercase">AI Generated</p>
-                        <div id="ai-img-container" class="aspect-[3/2] bg-gray-100 rounded-lg overflow-hidden flex items-center justify-center text-gray-300 text-sm">Loading...</div>
+                        <div id="ai-img-container" class="aspect-[3/2] bg-gray-100 rounded-lg overflow-hidden flex items-center justify-center text-gray-300 text-sm relative">Loading...</div>
                     </div>
                 </div>
+            </div>
+
+            <!-- Feedback & Regen -->
+            <div class="bg-gray-50 rounded-xl p-4 space-y-3">
+                <h3 class="font-semibold text-gray-900 text-sm">Generate / Regenerate</h3>
+                <textarea id="feedback-input" placeholder="Feedback for AI (e.g., 'make the bun brioche', 'should be flat tostadas')" rows="2" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm resize-none">${prevFeedback}</textarea>
+                <div class="flex gap-2">
+                    <button id="regen-btn" class="flex-1 py-2 rounded-lg text-sm font-medium bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                        Regenerate Image (~$0.04)
+                    </button>
+                </div>
+                <div id="regen-status" class="hidden text-sm text-purple-600 flex items-center gap-2">
+                    <svg class="animate-spin w-4 h-4" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"/></svg>
+                    Generating with Claude + FLUX... (~15 seconds)
+                </div>
+                <div id="regen-error" class="hidden text-sm text-red-600"></div>
             </div>
 
             <!-- Actions -->
             <div class="flex gap-2">
                 <button id="modal-approve" class="flex-1 py-2 rounded-lg text-sm font-medium ${review?.status === 'approved' ? 'bg-green-600 text-white' : 'bg-green-50 text-green-700 hover:bg-green-100'}">
-                    ${review?.status === 'approved' ? 'Approved' : 'Approve'}
+                    ${review?.status === 'approved' ? `Approved by ${reviewer}` : 'Approve'}
                 </button>
                 <button id="modal-flag" class="flex-1 py-2 rounded-lg text-sm font-medium ${review?.status === 'flagged' ? 'bg-red-600 text-white' : 'bg-red-50 text-red-700 hover:bg-red-100'}">
-                    ${review?.status === 'flagged' ? 'Flagged' : 'Flag for Regen'}
+                    ${review?.status === 'flagged' ? `Flagged by ${reviewer}` : 'Flag for Regen'}
                 </button>
                 <button id="modal-clear" class="py-2 px-3 rounded-lg text-sm font-medium bg-gray-50 text-gray-500 hover:bg-gray-100">Clear</button>
             </div>
 
-            ${review?.status === 'flagged' && review.notes ? `<div class="bg-red-50 rounded-lg p-3 text-sm text-red-700"><strong>Notes:</strong> ${review.notes}</div>` : ''}
+            ${review?.notes ? `<div class="bg-red-50 rounded-lg p-3 text-sm text-red-700"><strong>Notes:</strong> ${review.notes}</div>` : ''}
+
+            <!-- Last Prompt Used -->
+            ${review?.prompt ? `
+            <details>
+                <summary class="font-semibold text-gray-900 text-sm cursor-pointer hover:text-gray-600">Last Prompt Used</summary>
+                <div class="mt-2 bg-gray-50 rounded-lg p-3 text-xs font-mono text-gray-600 leading-relaxed">${review.prompt}</div>
+            </details>` : ''}
+
+            <!-- Past Generations -->
+            <details id="archive-section" open>
+                <summary class="font-semibold text-gray-900 text-sm cursor-pointer hover:text-gray-600">Past Generations</summary>
+                <div id="archive-gallery" class="mt-3 text-sm text-gray-400">Loading archive...</div>
+            </details>
 
             <!-- Ingredients -->
             <details>
@@ -334,53 +396,163 @@ async function openModal(idx: number) {
     // Load images
     if (coverPath) {
         getImageUrl(coverPath).then(url => {
-            const container = document.getElementById('ai-img-container')!;
-            if (url) container.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${url}', '_blank')">`;
-            else container.textContent = 'Not available';
+            const c = document.getElementById('ai-img-container')!;
+            if (url) c.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${url}', '_blank')">`;
+            else c.textContent = 'Not available';
         });
         getArchiveImageUrl(coverPath).then(url => {
-            const container = document.getElementById('original-img-container')!;
-            if (url) container.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${url}', '_blank')">`;
-            else container.textContent = 'No original';
+            const c = document.getElementById('original-img-container')!;
+            if (url) c.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${url}', '_blank')">`;
+            else c.textContent = 'No original';
         });
     } else {
         document.getElementById('ai-img-container')!.textContent = 'No image';
         document.getElementById('original-img-container')!.textContent = 'No original';
     }
 
-    // Modal button handlers
+    // Regen button
+    document.getElementById('regen-btn')?.addEventListener('click', () => handleRegen(r.id));
+
+    // My review buttons
     document.getElementById('modal-approve')?.addEventListener('click', () => {
-        setReview(r.id, 'approved');
+        const feedback = (document.getElementById('feedback-input') as HTMLTextAreaElement)?.value || '';
+        setReview(r.id, 'approved', '', feedback);
     });
     document.getElementById('modal-flag')?.addEventListener('click', () => {
         const notes = prompt('Regen notes (optional):');
         if (notes === null) return;
-        setReview(r.id, 'flagged', notes);
+        const feedback = (document.getElementById('feedback-input') as HTMLTextAreaElement)?.value || '';
+        setReview(r.id, 'flagged', notes, feedback);
     });
-    document.getElementById('modal-clear')?.addEventListener('click', () => {
-        clearReview(r.id);
-    });
+    document.getElementById('modal-clear')?.addEventListener('click', () => clearReview(r.id));
+
+    // Load archive gallery
+    loadArchiveGallery(r.id);
+}
+
+async function handleRegen(recipeId: string) {
+    if (isGenerating) return;
+    isGenerating = true;
+
+    const btn = document.getElementById('regen-btn') as HTMLButtonElement;
+    const status = document.getElementById('regen-status')!;
+    const error = document.getElementById('regen-error')!;
+    const aiContainer = document.getElementById('ai-img-container')!;
+    const feedback = (document.getElementById('feedback-input') as HTMLTextAreaElement)?.value || '';
+
+    btn.disabled = true;
+    btn.textContent = 'Generating...';
+    status.classList.remove('hidden');
+    error.classList.add('hidden');
+
+    // Show loading overlay on AI image
+    aiContainer.innerHTML = `
+        <div class="w-full h-full flex flex-col items-center justify-center bg-gray-100 text-purple-600">
+            <svg class="animate-spin w-8 h-8 mb-2" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"/></svg>
+            <span class="text-sm">Generating...</span>
+        </div>`;
+
+    try {
+        const result = await regenRecipeImage(recipeId, feedback || undefined);
+
+        // Show new image
+        aiContainer.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${result.downloadUrl}', '_blank')">`;
+
+        // Save prompt and feedback to review
+        setReview(recipeId, 'approved', '', feedback, result.prompt);
+
+        // Refresh archive gallery
+        loadArchiveGallery(recipeId);
+
+        status.classList.add('hidden');
+        btn.textContent = 'Regenerate Again (~$0.04)';
+    } catch (err: any) {
+        error.textContent = err.message || 'Generation failed. Check Replicate credits.';
+        error.classList.remove('hidden');
+        status.classList.add('hidden');
+        btn.textContent = 'Regenerate Image (~$0.04)';
+
+        // Restore previous image
+        const r = recipes.find(r => r.id === recipeId);
+        const coverPath = r?.assets.find(a => a.context === 'cover')?.url;
+        if (coverPath) {
+            const url = await getImageUrl(coverPath);
+            if (url) aiContainer.innerHTML = `<img src="${url}" class="w-full h-full object-cover">`;
+        }
+    }
+
+    btn.disabled = false;
+    isGenerating = false;
+}
+
+async function loadArchiveGallery(recipeId: string) {
+    const gallery = document.getElementById('archive-gallery');
+    if (!gallery) return;
+
+    try {
+        const images = await listArchiveImages(recipeId);
+        if (!images.length) {
+            gallery.textContent = 'No past generations yet.';
+            return;
+        }
+
+        gallery.innerHTML = `
+            <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                ${images.map((img: ArchiveImage) => `
+                    <div class="border border-gray-200 rounded-lg overflow-hidden">
+                        <img src="${img.url}" class="w-full aspect-[3/2] object-cover cursor-pointer" onclick="window.open('${img.url}', '_blank')" loading="lazy">
+                        <div class="p-2">
+                            <p class="text-xs text-gray-400">${img.timestamp.split('T')[0] || 'Unknown'}</p>
+                            <button class="assign-archive-btn w-full mt-1 py-1 text-xs font-medium bg-blue-50 text-blue-700 rounded hover:bg-blue-100" data-recipe-id="${recipeId}" data-archive-path="${img.path}">Use This</button>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        `;
+
+        // Assign buttons
+        document.querySelectorAll('.assign-archive-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const rid = (btn as HTMLElement).dataset.recipeId!;
+                const path = (btn as HTMLElement).dataset.archivePath!;
+                (btn as HTMLButtonElement).textContent = 'Assigning...';
+                (btn as HTMLButtonElement).disabled = true;
+                try {
+                    const result = await assignArchiveImage(rid, path);
+                    const aiContainer = document.getElementById('ai-img-container');
+                    if (aiContainer) {
+                        aiContainer.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${result.downloadUrl}', '_blank')">`;
+                    }
+                    (btn as HTMLButtonElement).textContent = 'Assigned!';
+                } catch (err: any) {
+                    (btn as HTMLButtonElement).textContent = 'Failed';
+                    alert(err.message);
+                }
+            });
+        });
+    } catch {
+        gallery.textContent = 'Failed to load archive.';
+    }
 }
 
 function closeModal() {
     document.getElementById('modal')!.classList.add('hidden');
     document.body.style.overflow = '';
     currentModalIndex = -1;
+    popRecipeUrl();
 }
 
 function navigateModal(direction: number) {
     const newIdx = currentModalIndex + direction;
-    if (newIdx >= 0 && newIdx < filteredRecipes.length) {
-        openModal(newIdx);
-    }
+    if (newIdx >= 0 && newIdx < filteredRecipes.length) openModal(newIdx);
 }
 
 function exportFlagged() {
     const flagged = recipes.filter(r => reviews.get(r.id)?.status === 'flagged');
     if (!flagged.length) { alert('No flagged recipes'); return; }
     const text = flagged.map(r => {
-        const notes = reviews.get(r.id)?.notes || '';
-        return `${r.id} | ${r.name}${notes ? ' | ' + notes : ''}`;
+        const rev = reviews.get(r.id);
+        return `${r.id} | ${r.name} | flagged by ${rev?.reviewedBy?.split('@')[0] || '?'}${rev?.notes ? ' | ' + rev.notes : ''}`;
     }).join('\n');
     navigator.clipboard.writeText(text).then(() => alert(`Copied ${flagged.length} flagged IDs`));
 }
@@ -392,7 +564,6 @@ function exportApproved() {
     navigator.clipboard.writeText(text).then(() => alert(`Copied ${approved.length} approved IDs`));
 }
 
-// Keyboard shortcuts
 document.addEventListener('keydown', (e) => {
     if (currentModalIndex >= 0) {
         if (e.key === 'Escape') closeModal();

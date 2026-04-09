@@ -1,11 +1,18 @@
 import { collection, getDocs, doc, setDoc, deleteDoc, onSnapshot, orderBy, query, serverTimestamp, Unsubscribe } from 'firebase/firestore';
 import { ref, getDownloadURL } from 'firebase/storage';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db, storage } from './firebase-config';
 import { getCurrentUser } from './auth';
-import type { Recipe, RecipeReview } from './types';
+import type { Recipe, RecipeReview, ArchiveImage } from './types';
 
-// Cache for storage download URLs
+const functions = getFunctions();
 const urlCache = new Map<string, string>();
+
+export function clearUrlCache(recipeId: string) {
+    for (const key of urlCache.keys()) {
+        if (key.includes(recipeId)) urlCache.delete(key);
+    }
+}
 
 export async function getImageUrl(storagePath: string): Promise<string | null> {
     if (!storagePath) return null;
@@ -16,9 +23,7 @@ export async function getImageUrl(storagePath: string): Promise<string | null> {
         const url = await getDownloadURL(storageRef);
         urlCache.set(cleanPath, url);
         return url;
-    } catch {
-        return null;
-    }
+    } catch { return null; }
 }
 
 export async function getArchiveImageUrl(coverPath: string): Promise<string | null> {
@@ -43,24 +48,23 @@ export async function loadRecipes(): Promise<Recipe[]> {
     }));
 }
 
-export async function setReview(recipeId: string, status: 'approved' | 'flagged', notes: string = '') {
+export async function setReview(recipeId: string, status: 'approved' | 'flagged', notes: string = '', feedback: string = '', prompt: string = '') {
     const user = getCurrentUser();
-    if (!user) return;
+    if (!user?.email) return;
     const reviewRef = doc(db, 'recipe-reviews', recipeId);
     await setDoc(reviewRef, {
         recipeId,
         status,
         notes,
+        feedback,
+        prompt,
         reviewedBy: user.email,
         reviewedAt: serverTimestamp(),
-        updatedBy: user.email,
-        updatedAt: serverTimestamp(),
     }, { merge: true });
 }
 
 export async function clearReview(recipeId: string) {
-    const reviewRef = doc(db, 'recipe-reviews', recipeId);
-    await deleteDoc(reviewRef);
+    await deleteDoc(doc(db, 'recipe-reviews', recipeId));
 }
 
 export function subscribeToReviews(callback: (reviews: Map<string, RecipeReview>) => void): Unsubscribe {
@@ -73,12 +77,46 @@ export function subscribeToReviews(callback: (reviews: Map<string, RecipeReview>
                 recipeId: d.id,
                 status: data.status,
                 notes: data.notes || '',
+                feedback: data.feedback || '',
+                prompt: data.prompt || '',
                 reviewedBy: data.reviewedBy || '',
                 reviewedAt: data.reviewedAt?.toDate() || new Date(),
-                updatedBy: data.updatedBy || '',
-                updatedAt: data.updatedAt?.toDate() || new Date(),
+                generatedBy: data.generatedBy || undefined,
+                generatedAt: data.generatedAt?.toDate() || undefined,
             });
         });
         callback(reviews);
     });
+}
+
+export async function regenRecipeImage(recipeId: string, feedback?: string): Promise<{ downloadUrl: string; prompt: string; visualDescription: string }> {
+    const fn = httpsCallable<{ recipeId: string; feedback?: string }, { downloadUrl: string; prompt: string; visualDescription: string }>(functions, 'aiRegenRecipeImage');
+    const result = await fn({ recipeId, feedback });
+    clearUrlCache(recipeId);
+    // Log who generated it on the review doc
+    const user = getCurrentUser();
+    if (user?.email) {
+        const reviewRef = doc(db, 'recipe-reviews', recipeId);
+        await setDoc(reviewRef, {
+            recipeId,
+            generatedBy: user.email,
+            generatedAt: serverTimestamp(),
+            prompt: result.data.prompt,
+            feedback: feedback || '',
+        }, { merge: true });
+    }
+    return result.data;
+}
+
+export async function listArchiveImages(recipeId: string): Promise<ArchiveImage[]> {
+    const fn = httpsCallable<{ recipeId: string }, { images: ArchiveImage[] }>(functions, 'aiListArchiveImages');
+    const result = await fn({ recipeId });
+    return result.data.images;
+}
+
+export async function assignArchiveImage(recipeId: string, archivePath: string): Promise<{ downloadUrl: string }> {
+    const fn = httpsCallable<{ recipeId: string; archivePath: string }, { downloadUrl: string }>(functions, 'aiAssignArchiveImage');
+    const result = await fn({ recipeId, archivePath });
+    clearUrlCache(recipeId);
+    return result.data;
 }

@@ -29,10 +29,19 @@ export interface RecipeReview {
     recipeId: string;
     status: 'approved' | 'flagged';
     notes: string;
+    feedback: string;
+    prompt: string;
     reviewedBy: string;
     reviewedAt: Date;
-    updatedBy: string;
-    updatedAt: Date;
+    generatedBy?: string;
+    generatedAt?: Date;
+}
+
+export interface ArchiveImage {
+    filename: string;
+    path: string;
+    url: string;
+    timestamp: string;
 }
 
 export type FilterType = 'all' | 'approved' | 'flagged' | 'not-reviewed';
