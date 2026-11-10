@@ -59,6 +59,8 @@ function pictureLabel(img: HTMLElement): string {
     if (card) return `Past generation · ${card.querySelector('p')?.textContent?.trim() || ''}`;
     const step = img.closest('[data-step-root]') as HTMLElement | null;
     if (step?.dataset.stepRoot) return `Step ${step.dataset.stepRoot}`;
+    const cooking = img.closest('[data-cooking-label]') as HTMLElement | null;
+    if (cooking?.dataset.cookingLabel) return `Cooking mode · ${cooking.dataset.cookingLabel}`;
     if (img.closest('#timeline')) return 'From the timeline';
     return img.getAttribute('alt') || '';
 }

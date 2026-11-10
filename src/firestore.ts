@@ -1,5 +1,5 @@
 import { collection, getDocs, addDoc, doc, setDoc, deleteDoc, onSnapshot, orderBy, query, where, serverTimestamp, Unsubscribe } from 'firebase/firestore';
-import { ref, getDownloadURL, uploadBytes } from 'firebase/storage';
+import { ref, getDownloadURL, uploadBytes, listAll } from 'firebase/storage';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db, storage } from './firebase-config';
 import { getCurrentUser } from './auth';
@@ -192,4 +192,35 @@ export async function assignArchiveImage(recipeId: string, archivePath: string):
     const result = await fn({ recipeId, archivePath });
     clearUrlCache(recipeId);
     return result.data;
+}
+
+/** One cooking-mode picture: the counter for a servings count, or a doneness stage. */
+export interface CookingModeImage {
+    path: string;
+    url: string;
+    label: string;
+    /** Sort order: counters by servings, then seasoned, cooking, cooked. */
+    order: number;
+}
+
+const DONENESS_ORDER: Record<string, number> = { seasoned: 1, cooking: 2, cooked: 3 };
+
+/**
+ * The countertop pictures cooking mode made for a recipe, from
+ * recipes/{id}/countertop/: servings-{n}.jpg and doneness-{stage}.jpg. They are
+ * made the first time someone opens cooking mode, so most recipes have none.
+ */
+export async function listCookingModeImages(recipeId: string): Promise<CookingModeImage[]> {
+    const listing = await listAll(ref(storage, `recipes/${recipeId}/countertop`));
+    const images = await Promise.all(listing.items.map(async (item): Promise<CookingModeImage | null> => {
+        const servings = item.name.match(/^servings-(\d+)\.(jpg|webp|png)$/);
+        const stage = item.name.match(/^doneness-(seasoned|cooking|cooked)\.(jpg|webp|png)$/);
+        if (!servings && !stage) return null;
+        const url = await getDownloadURL(item).catch(() => '');
+        if (!url) return null;
+        return servings
+            ? { path: item.fullPath, url, label: `Counter · ${servings[1]} servings`, order: Number(servings[1]) / 1000 }
+            : { path: item.fullPath, url, label: stage![1][0].toUpperCase() + stage![1].slice(1), order: DONENESS_ORDER[stage![1]] };
+    }));
+    return images.filter((i): i is CookingModeImage => !!i).sort((a, b) => a.order - b.order);
 }
