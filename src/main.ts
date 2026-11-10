@@ -1,6 +1,6 @@
 import './style.css';
 import { initAuth, setAuthChangeHandler, signInWithGoogle, logOut, getCurrentUser } from './auth';
-import { loadRecipes, subscribeToReviews, setReview, clearReview, clearUrlCache, addFeedback, loadRecipeEvents, getImageUrl, getArchiveImageUrl, regenRecipeImage, regenStepImage, uploadExtraReference, listArchiveImages, assignArchiveImage } from './firestore';
+import { listCookingModeImages, loadRecipes, subscribeToReviews, setReview, clearReview, clearUrlCache, addFeedback, loadRecipeEvents, getImageUrl, getArchiveImageUrl, regenRecipeImage, regenStepImage, uploadExtraReference, listArchiveImages, assignArchiveImage } from './firestore';
 import type { Recipe, RecipeReview, RecipeEvent, FilterType, ArchiveImage } from './types';
 import { lightboxIsOpen, closeLightbox, stepLightbox } from './lightbox';
 import type { User } from 'firebase/auth';
@@ -403,6 +403,12 @@ async function openModal(idx: number) {
                 <div id="archive-gallery" class="mt-3 text-sm text-gray-400">Loading archive...</div>
             </details>
 
+            <!-- Cooking mode -->
+            <details id="cooking-mode-section" open>
+                <summary class="font-semibold text-gray-900 text-sm cursor-pointer hover:text-gray-600">Cooking mode</summary>
+                <div id="cooking-mode-gallery" class="mt-3 text-sm text-gray-400">Loading cooking mode…</div>
+            </details>
+
             <!-- Ingredients -->
             <details open>
                 <summary class="font-semibold text-gray-900 text-sm cursor-pointer hover:text-gray-600">
@@ -576,9 +582,10 @@ async function openModal(idx: number) {
     });
     document.getElementById('modal-clear')?.addEventListener('click', () => clearReview(r.id));
 
-    // Load timeline and archive gallery
+    // Load timeline, archive gallery and cooking mode
     loadTimeline(r.id);
     loadArchiveGallery(r.id);
+    loadCookingMode(r.id);
 
     // Wire up per-step image generation + load thumbnails
     wireStepImageHandlers(r);
@@ -811,6 +818,30 @@ async function loadArchiveGallery(recipeId: string) {
         });
     } catch {
         gallery.textContent = 'Failed to load archive.';
+    }
+}
+
+async function loadCookingMode(recipeId: string) {
+    const gallery = document.getElementById('cooking-mode-gallery');
+    if (!gallery) return;
+    try {
+        const images = await listCookingModeImages(recipeId);
+        // The modal may have moved to another recipe while this loaded
+        if (currentModalIndex < 0 || filteredRecipes[currentModalIndex]?.id !== recipeId) return;
+        if (!images.length) {
+            gallery.textContent = 'No cooking-mode pictures yet. They are made the first time someone opens cooking mode for this recipe.';
+            return;
+        }
+        gallery.innerHTML = `
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                ${images.map(img => `
+                    <figure class="border border-gray-200 rounded-lg overflow-hidden" data-cooking-label="${img.label}">
+                        <img src="${img.url}" alt="${img.label}" class="w-full aspect-[3/2] object-cover cursor-zoom-in lb-img" data-full="${img.url}" loading="lazy">
+                        <figcaption class="px-2 py-1.5 text-xs text-gray-500">${img.label}</figcaption>
+                    </figure>`).join('')}
+            </div>`;
+    } catch {
+        gallery.textContent = 'Could not load cooking-mode pictures.';
     }
 }
 
