@@ -1,7 +1,8 @@
 import './style.css';
 import { initAuth, setAuthChangeHandler, signInWithGoogle, logOut, getCurrentUser } from './auth';
-import { loadRecipes, subscribeToReviews, setReview, clearReview, addFeedback, loadRecipeEvents, getImageUrl, getArchiveImageUrl, regenRecipeImage, listArchiveImages, assignArchiveImage } from './firestore';
+import { loadRecipes, subscribeToReviews, setReview, clearReview, clearUrlCache, addFeedback, loadRecipeEvents, getImageUrl, getArchiveImageUrl, regenRecipeImage, regenStepImage, uploadExtraReference, listArchiveImages, assignArchiveImage } from './firestore';
 import type { Recipe, RecipeReview, RecipeEvent, FilterType, ArchiveImage } from './types';
+import { lightboxIsOpen, closeLightbox, stepLightbox } from './lightbox';
 import type { User } from 'firebase/auth';
 
 let recipes: Recipe[] = [];
@@ -11,6 +12,7 @@ let currentFilter: FilterType = 'all';
 let searchQuery = '';
 let currentModalIndex = -1;
 let isGenerating = false;
+let imageVersions = new Map<string, number>(); // tracks image changes to bust cache
 
 const app = document.getElementById('app')!;
 
@@ -154,7 +156,16 @@ async function loadData() {
 
     // Start loading reviews immediately (parallel with recipes)
     const reviewsReady = new Promise<void>(resolve => {
-        subscribeToReviews((r) => { reviews = r; renderStats(); if (recipes.length) renderGrid(); resolve(); });
+        subscribeToReviews((r) => {
+            reviews = r;
+            renderStats();
+            if (recipes.length) renderGrid();
+            // Re-render open modal so buttons update in real-time
+            if (currentModalIndex >= 0 && currentModalIndex < filteredRecipes.length) {
+                openModal(currentModalIndex);
+            }
+            resolve();
+        });
     });
 
     // Load recipes
@@ -229,7 +240,7 @@ function renderGrid() {
             <div class="bg-white rounded-xl overflow-hidden border border-gray-200 hover:shadow-lg transition-shadow">
                 <div class="cursor-pointer recipe-card-click" data-idx="${idx}">
                     <div class="aspect-[3/2] bg-gray-100 overflow-hidden">
-                        ${coverAsset ? `<img data-cover-path="${coverAsset.url}" alt="${r.name}" class="w-full h-full object-cover lazy-img" loading="lazy">` : '<div class="flex items-center justify-center h-full text-gray-300 text-sm">No image</div>'}
+                        ${coverAsset ? `<img data-cover-path="${coverAsset.url}" data-version="${imageVersions.get(r.id) || 0}" alt="${r.name}" class="w-full h-full object-cover lazy-img" loading="lazy">` : '<div class="flex items-center justify-center h-full text-gray-300 text-sm">No image</div>'}
                     </div>
                     <div class="p-3 pb-1">
                         <div class="flex items-start justify-between gap-2">
@@ -257,13 +268,18 @@ function renderGrid() {
             if (!entry.isIntersecting) return;
             const img = entry.target as HTMLImageElement;
             const path = img.dataset.coverPath;
-            if (path && !img.src) {
-                observer.unobserve(img);
-                const url = await getImageUrl(path);
-                if (url) img.src = url;
+            if (!path) return;
+            observer.unobserve(img);
+            const version = parseInt(img.dataset.version || '0');
+            if (version > 0) {
+                // Image was updated — clear cache to get fresh URL
+                const cleanPath = path.startsWith('/') ? path.substring(1) : path;
+                clearUrlCache(cleanPath.split('/')[1] || '');
             }
+            const url = await getImageUrl(path);
+            if (url) img.src = url;
         });
-    }, { rootMargin: '200px' }); // preload 200px before entering viewport
+    }, { rootMargin: '200px' });
 
     document.querySelectorAll('.lazy-img').forEach(img => observer.observe(img));
     document.querySelectorAll('.recipe-card-click').forEach(el => {
@@ -325,6 +341,7 @@ async function openModal(idx: number) {
                     <div>
                         <p class="text-xs text-gray-400 mb-1 font-medium uppercase">Original</p>
                         <div id="original-img-container" class="aspect-[3/2] bg-gray-100 rounded-lg overflow-hidden flex items-center justify-center text-gray-300 text-sm">Loading...</div>
+                        <button id="use-original-btn" class="hidden w-full mt-2 py-1.5 rounded-lg text-xs font-medium bg-blue-50 text-blue-700 hover:bg-blue-100">Use Original</button>
                     </div>
                     <div>
                         <p class="text-xs text-gray-400 mb-1 font-medium uppercase">AI Generated</p>
@@ -350,10 +367,26 @@ async function openModal(idx: number) {
                 <div id="timeline" class="space-y-2 text-sm text-gray-500">Loading timeline...</div>
                 <div class="border-t border-gray-200 pt-3 space-y-2">
                     <textarea id="feedback-input" placeholder="Add feedback (e.g., 'make the bun brioche', 'should be flat tostadas')" rows="2" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm resize-none">${prevFeedback}</textarea>
+                    <div class="flex gap-2 items-center flex-wrap">
+                        <select id="model-select" class="px-2 py-1.5 border border-gray-200 rounded-lg text-xs bg-white">
+                            <option value="flux-3-image" selected>FLUX 3 (~$0.15)</option>
+                            <option value="flux-2-pro">FLUX 2 Pro (~$0.05)</option>
+                            <option value="flux-1.1-pro">FLUX 1.1 Pro (~$0.04)</option>
+                            <option value="flux-schnell">FLUX Schnell (~$0.003)</option>
+                        </select>
+                        <label class="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
+                            <input type="checkbox" id="use-reference" class="rounded"> Use original as reference
+                        </label>
+                        <label class="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer" title="Add extra reference images (e.g., for angle/style)">
+                            <input type="file" id="extra-reference" accept="image/*" multiple class="hidden">
+                            <button type="button" id="extra-ref-btn" class="px-2 py-1 rounded text-xs bg-gray-100 hover:bg-gray-200 text-gray-600">+ Style refs</button>
+                            <span id="extra-ref-name" class="text-xs text-gray-400 truncate max-w-[180px]"></span>
+                        </label>
+                    </div>
                     <div class="flex gap-2">
                         <button id="send-feedback-btn" class="px-4 py-2 rounded-lg text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300">Send Feedback</button>
                         <button id="regen-btn" class="flex-1 py-2 rounded-lg text-sm font-medium bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed">
-                            Regenerate (~$0.04)
+                            Regenerate (~$0.15)
                         </button>
                     </div>
                     <div id="regen-status" class="hidden text-sm text-purple-600 flex items-center gap-2">
@@ -371,18 +404,79 @@ async function openModal(idx: number) {
             </details>
 
             <!-- Ingredients -->
-            <details>
-                <summary class="font-semibold text-gray-900 text-sm cursor-pointer hover:text-gray-600">Ingredients (${r.ingredients.length})</summary>
-                <ul class="mt-2 space-y-1 ml-4 list-disc">
-                    ${r.ingredients.map(i => `<li class="text-sm text-gray-700">${i.name}${i.quantity ? ` <span class="text-gray-400">(${i.quantity})</span>` : ''}</li>`).join('')}
-                </ul>
+            <details open>
+                <summary class="font-semibold text-gray-900 text-sm cursor-pointer hover:text-gray-600">
+                    Ingredients
+                    <span class="ml-2 text-xs font-normal text-gray-500">${r.ingredients.length} item${r.ingredients.length === 1 ? '' : 's'}</span>
+                </summary>
+                <div class="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    ${r.ingredients.map(i => `
+                        <div class="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2">
+                            <div class="flex-1 min-w-0">
+                                <div class="text-sm font-medium text-gray-800 truncate">${i.name}</div>
+                                ${i.quantity ? `<div class="text-xs text-gray-500">${i.quantity}</div>` : ''}
+                            </div>
+                            ${i.id ? `<span class="text-[10px] text-green-600 shrink-0" title="Linked to ingredients/${i.id}">&#x1f517;</span>` : `<span class="text-[10px] text-red-500 shrink-0" title="Not linked to catalog">&#x26a0;&#xfe0f;</span>`}
+                        </div>
+                    `).join('')}
+                </div>
             </details>
 
             <!-- Directions -->
-            <details>
-                <summary class="font-semibold text-gray-900 text-sm cursor-pointer hover:text-gray-600">Directions (${r.directions.length} steps)</summary>
-                <ol class="mt-2 ml-4 list-decimal space-y-2">
-                    ${r.directions.map(d => `<li class="text-sm text-gray-700">Step ${d.step}: ${d.description}</li>`).join('')}
+            <details open>
+                <summary class="font-semibold text-gray-900 text-sm cursor-pointer hover:text-gray-600">
+                    Directions
+                    <span class="ml-2 text-xs font-normal text-gray-500">${r.directions.length} step${r.directions.length === 1 ? '' : 's'}</span>
+                    ${r.directions.some(d => d.imagePrompt) ? `<span class="ml-2 text-[10px] font-normal px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">&#x1f3a8; ${r.directions.filter(d => d.imagePrompt).length} image prompts</span>` : ''}
+                </summary>
+                <ol class="mt-3 space-y-3">
+                    ${r.directions.map(d => `
+                        <li class="bg-white border border-gray-200 rounded-lg p-3" data-step-root="${d.step}">
+                            <div class="flex gap-3">
+                                <span class="shrink-0 w-7 h-7 bg-gray-100 text-gray-700 rounded-full flex items-center justify-center text-xs font-semibold">${d.step}</span>
+                                <div class="flex-1 min-w-0 space-y-2">
+                                    <div class="text-sm text-gray-800">${d.description}</div>
+                                    ${d.imagePrompt ? `
+                                        <details class="" open>
+                                            <summary class="text-[11px] text-blue-600 cursor-pointer hover:underline">&#x1f3a8; Image prompt</summary>
+                                            <div class="mt-1 text-xs text-gray-600 bg-blue-50 rounded p-2 font-mono whitespace-pre-wrap">${d.imagePrompt}</div>
+                                        </details>
+                                    ` : `<div class="text-[11px] text-gray-400">No image prompt yet — will be generated on next audit</div>`}
+
+                                    <!-- Step image + generation controls -->
+                                    <div class="grid grid-cols-1 sm:grid-cols-[160px_1fr] gap-3 pt-1">
+                                        <div id="step-${d.step}-img-container" class="aspect-[3/2] bg-gray-100 rounded-lg overflow-hidden flex items-center justify-center text-gray-300 text-xs">Loading...</div>
+                                        <div class="space-y-1.5">
+                                            <textarea id="step-${d.step}-feedback" placeholder="Optional feedback — see mode toggle" rows="1" class="w-full px-2 py-1.5 border border-gray-200 rounded text-xs resize-none"></textarea>
+                                            <div class="flex items-center gap-1.5 text-[11px] text-gray-600">
+                                                <span>Mode:</span>
+                                                <label class="flex items-center gap-1 cursor-pointer"><input type="radio" name="step-${d.step}-mode" value="tweak" checked> Tweak (append)</label>
+                                                <label class="flex items-center gap-1 cursor-pointer"><input type="radio" name="step-${d.step}-mode" value="overwrite"> Overwrite</label>
+                                            </div>
+                                            <div class="flex gap-1.5 items-center flex-wrap text-xs">
+                                                <select id="step-${d.step}-model" class="px-1.5 py-1 border border-gray-200 rounded text-[11px] bg-white">
+                                                    <option value="flux-2-pro">FLUX 2 Pro ($0.05)</option>
+                                                    <option value="flux-1.1-pro">FLUX 1.1 Pro ($0.04)</option>
+                                                    <option value="flux-schnell">FLUX Schnell ($0.003)</option>
+                                                </select>
+                                                <label class="flex items-center gap-1 text-[11px] text-gray-600 cursor-pointer">
+                                                    <input type="checkbox" id="step-${d.step}-use-reference" class="rounded" checked> Use original
+                                                </label>
+                                                <input type="file" id="step-${d.step}-extra-ref" accept="image/*" multiple class="hidden">
+                                                <button type="button" data-step-extra-btn="${d.step}" class="px-1.5 py-1 rounded text-[11px] bg-gray-100 hover:bg-gray-200 text-gray-600">+ Style refs</button>
+                                                <span id="step-${d.step}-extra-name" class="text-[10px] text-gray-400 truncate max-w-[100px]"></span>
+                                            </div>
+                                            <button id="step-${d.step}-regen-btn" data-step-regen="${d.step}" ${d.imagePrompt ? '' : 'disabled'} class="w-full py-1.5 rounded text-xs font-medium bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                                                ${d.imagePrompt ? 'Regenerate step image (~$0.05)' : 'Audit recipe first'}
+                                            </button>
+                                            <div id="step-${d.step}-status" class="hidden text-[11px] text-purple-600">Generating...</div>
+                                            <div id="step-${d.step}-error" class="hidden text-[11px] text-red-600"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </li>
+                    `).join('')}
                 </ol>
             </details>
         </div>
@@ -392,18 +486,70 @@ async function openModal(idx: number) {
     if (coverPath) {
         getImageUrl(coverPath).then(url => {
             const c = document.getElementById('ai-img-container')!;
-            if (url) c.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${url}', '_blank')">`;
+            if (url) c.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${url}">`;
             else c.textContent = 'Not available';
         });
+        const archiveCoverPath = (coverPath.startsWith('/') ? coverPath.substring(1) : coverPath).replace('/images/', '/images/_archive/');
         getArchiveImageUrl(coverPath).then(url => {
             const c = document.getElementById('original-img-container')!;
-            if (url) c.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${url}', '_blank')">`;
-            else c.textContent = 'No original';
+            if (url) {
+                c.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${url}">`;
+                // Show "Use Original" button
+                const btn = document.getElementById('use-original-btn')!;
+                btn.classList.remove('hidden');
+                btn.addEventListener('click', async () => {
+                    btn.textContent = 'Assigning...';
+                    (btn as HTMLButtonElement).disabled = true;
+                    try {
+                        const result = await assignArchiveImage(r.id, archiveCoverPath);
+                        const aiC = document.getElementById('ai-img-container');
+                        if (aiC) aiC.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${result.downloadUrl}">`;
+                        btn.textContent = 'Original Restored';
+                        imageVersions.set(r.id, (imageVersions.get(r.id) || 0) + 1);
+                        renderGrid();
+                        loadTimeline(r.id);
+                        loadArchiveGallery(r.id);
+                    } catch (err: any) {
+                        btn.textContent = 'Failed';
+                        alert(err.message);
+                    }
+                });
+            } else {
+                c.textContent = 'No original';
+            }
         });
     } else {
         document.getElementById('ai-img-container')!.textContent = 'No image';
         document.getElementById('original-img-container')!.textContent = 'No original';
     }
+
+    // Model select — update cost on button
+    const costs: Record<string, string> = { 'flux-3-image': '$0.15', 'flux-1.1-pro': '$0.04', 'flux-2-pro': '$0.05', 'flux-schnell': '$0.003' };
+    document.getElementById('model-select')?.addEventListener('change', (e) => {
+        const model = (e.target as HTMLSelectElement).value;
+        const btn = document.getElementById('regen-btn');
+        if (btn) btn.textContent = `Regenerate (~${costs[model] || '$0.04'})`;
+        // Disable reference checkbox for schnell
+        const refCheckbox = document.getElementById('use-reference') as HTMLInputElement;
+        if (refCheckbox) {
+            refCheckbox.disabled = model === 'flux-schnell';
+            if (model === 'flux-schnell') refCheckbox.checked = false;
+        }
+    });
+
+    // Extra reference file picker
+    document.getElementById('extra-ref-btn')?.addEventListener('click', () => {
+        document.getElementById('extra-reference')?.click();
+    });
+    document.getElementById('extra-reference')?.addEventListener('change', (e) => {
+        const files = (e.target as HTMLInputElement).files;
+        const nameSpan = document.getElementById('extra-ref-name');
+        if (nameSpan) {
+            if (!files?.length) nameSpan.textContent = '';
+            else if (files.length === 1) nameSpan.textContent = files[0].name;
+            else nameSpan.textContent = `${files.length} files`;
+        }
+    });
 
     // Regen button
     document.getElementById('regen-btn')?.addEventListener('click', () => handleRegen(r.id));
@@ -417,11 +563,13 @@ async function openModal(idx: number) {
         loadTimeline(r.id);
     });
 
-    // Review buttons
+    // Review buttons — only act if status is changing
     document.getElementById('modal-approve')?.addEventListener('click', () => {
+        if (reviews.get(r.id)?.status === 'approved') return;
         setReview(r.id, 'approved');
     });
     document.getElementById('modal-flag')?.addEventListener('click', () => {
+        if (reviews.get(r.id)?.status === 'flagged') return;
         const notes = prompt('Regen notes (optional):');
         if (notes === null) return;
         setReview(r.id, 'flagged', notes);
@@ -431,6 +579,100 @@ async function openModal(idx: number) {
     // Load timeline and archive gallery
     loadTimeline(r.id);
     loadArchiveGallery(r.id);
+
+    // Wire up per-step image generation + load thumbnails
+    wireStepImageHandlers(r);
+}
+
+async function wireStepImageHandlers(r: Recipe) {
+    // Load each step thumbnail from main path, fallback to _archive
+    for (const d of r.directions) {
+        loadStepThumbnail(r.id, d.step);
+    }
+
+    // File picker buttons
+    document.querySelectorAll<HTMLButtonElement>('[data-step-extra-btn]').forEach(btn => {
+        const step = btn.dataset.stepExtraBtn!;
+        btn.addEventListener('click', () => {
+            (document.getElementById(`step-${step}-extra-ref`) as HTMLInputElement)?.click();
+        });
+    });
+    r.directions.forEach(d => {
+        const input = document.getElementById(`step-${d.step}-extra-ref`) as HTMLInputElement;
+        input?.addEventListener('change', (e) => {
+            const files = (e.target as HTMLInputElement).files;
+            const nameSpan = document.getElementById(`step-${d.step}-extra-name`);
+            if (nameSpan) nameSpan.textContent = !files?.length ? '' : files.length === 1 ? files[0].name : `${files.length} files`;
+        });
+    });
+
+    // Regen buttons
+    document.querySelectorAll<HTMLButtonElement>('[data-step-regen]').forEach(btn => {
+        const step = parseInt(btn.dataset.stepRegen!, 10);
+        btn.addEventListener('click', () => handleStepRegen(r.id, step));
+    });
+}
+
+async function loadStepThumbnail(recipeId: string, stepNumber: number) {
+    const container = document.getElementById(`step-${stepNumber}-img-container`);
+    if (!container) return;
+    const mainPath = `recipes/${recipeId}/images/step-${stepNumber}_${recipeId}_1.jpg`;
+    const archivePath = `recipes/${recipeId}/images/_archive/step-${stepNumber}_${recipeId}_1.jpg`;
+    let url = await getImageUrl(mainPath);
+    let isOriginal = false;
+    if (!url) {
+        url = await getImageUrl(archivePath);
+        isOriginal = !!url;
+    }
+    if (url) {
+        container.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${url}">${isOriginal ? '<div class="absolute top-1 left-1 text-[9px] px-1.5 py-0.5 bg-black/60 text-white rounded">Original</div>' : ''}`;
+        container.classList.add('relative');
+    } else {
+        container.textContent = 'No step image';
+    }
+}
+
+async function handleStepRegen(recipeId: string, stepNumber: number) {
+    const btn = document.getElementById(`step-${stepNumber}-regen-btn`) as HTMLButtonElement;
+    const status = document.getElementById(`step-${stepNumber}-status`)!;
+    const error = document.getElementById(`step-${stepNumber}-error`)!;
+    const container = document.getElementById(`step-${stepNumber}-img-container`)!;
+    const feedback = (document.getElementById(`step-${stepNumber}-feedback`) as HTMLTextAreaElement)?.value || '';
+    const model = (document.getElementById(`step-${stepNumber}-model`) as HTMLSelectElement)?.value || 'flux-2-pro';
+    const useReference = (document.getElementById(`step-${stepNumber}-use-reference`) as HTMLInputElement)?.checked ?? true;
+    const modeRadio = document.querySelector<HTMLInputElement>(`input[name="step-${stepNumber}-mode"]:checked`);
+    const promptMode: 'tweak' | 'overwrite' = modeRadio?.value === 'overwrite' ? 'overwrite' : 'tweak';
+    const extraFiles = (document.getElementById(`step-${stepNumber}-extra-ref`) as HTMLInputElement)?.files;
+
+    btn.disabled = true;
+    btn.textContent = 'Generating...';
+    status.classList.remove('hidden');
+    error.classList.add('hidden');
+    container.innerHTML = `<div class="w-full h-full flex items-center justify-center bg-gray-100 text-purple-600 text-xs">Generating...</div>`;
+
+    try {
+        let extraReferenceUrls: string[] | undefined;
+        if (extraFiles?.length && useReference) {
+            extraReferenceUrls = await Promise.all(
+                Array.from(extraFiles).map((file, i) => uploadExtraReference(recipeId, file, i, `step-${stepNumber}`))
+            );
+        }
+        const result = await regenStepImage(recipeId, stepNumber, feedback || undefined, promptMode, model, useReference, extraReferenceUrls);
+        container.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${result.downloadUrl}">`;
+        container.classList.add('relative');
+        status.classList.add('hidden');
+        btn.disabled = false;
+        btn.textContent = 'Regenerate step image (~$0.05)';
+        // Refresh timeline to show new event
+        loadTimeline(recipeId);
+    } catch (err: any) {
+        error.textContent = err.message || 'Generation failed';
+        error.classList.remove('hidden');
+        status.classList.add('hidden');
+        btn.disabled = false;
+        btn.textContent = 'Regenerate step image (~$0.05)';
+        loadStepThumbnail(recipeId, stepNumber);
+    }
 }
 
 async function handleRegen(recipeId: string) {
@@ -442,6 +684,9 @@ async function handleRegen(recipeId: string) {
     const error = document.getElementById('regen-error')!;
     const aiContainer = document.getElementById('ai-img-container')!;
     const feedback = (document.getElementById('feedback-input') as HTMLTextAreaElement)?.value || '';
+    const model = (document.getElementById('model-select') as HTMLSelectElement)?.value || 'flux-3-image';
+    const useReference = (document.getElementById('use-reference') as HTMLInputElement)?.checked || false;
+    const extraRefFiles = (document.getElementById('extra-reference') as HTMLInputElement)?.files;
 
     btn.disabled = true;
     btn.textContent = 'Generating...';
@@ -456,22 +701,33 @@ async function handleRegen(recipeId: string) {
         </div>`;
 
     try {
-        const result = await regenRecipeImage(recipeId, feedback || undefined);
+        // Upload extra reference images to Storage if provided
+        let extraReferenceUrls: string[] | undefined;
+        if (extraRefFiles?.length && useReference) {
+            extraReferenceUrls = await Promise.all(
+                Array.from(extraRefFiles).map((file, i) => uploadExtraReference(recipeId, file, i))
+            );
+        }
 
-        // Show new image
-        aiContainer.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${result.downloadUrl}', '_blank')">`;
+        const result = await regenRecipeImage(recipeId, feedback || undefined, model, useReference, extraReferenceUrls);
+        repointCover(recipeId, result.coverPath);
+
+        // Show new image and update grid
+        aiContainer.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${result.downloadUrl}">`;
+        imageVersions.set(recipeId, (imageVersions.get(recipeId) || 0) + 1);
+        renderGrid();
 
         // Refresh timeline and archive gallery
         loadTimeline(recipeId);
         loadArchiveGallery(recipeId);
 
         status.classList.add('hidden');
-        btn.textContent = 'Regenerate Again (~$0.04)';
+        btn.textContent = `Regenerate Again (~${regenCost(model)})`;
     } catch (err: any) {
         error.textContent = err.message || 'Generation failed. Check Replicate credits.';
         error.classList.remove('hidden');
         status.classList.add('hidden');
-        btn.textContent = 'Regenerate Image (~$0.04)';
+        btn.textContent = `Regenerate (~${regenCost(model)})`;
 
         // Restore previous image
         const r = recipes.find(r => r.id === recipeId);
@@ -491,23 +747,42 @@ async function loadArchiveGallery(recipeId: string) {
     if (!gallery) return;
 
     try {
-        const images = await listArchiveImages(recipeId);
+        const [images, events] = await Promise.all([
+            listArchiveImages(recipeId),
+            loadRecipeEvents(recipeId),
+        ]);
         if (!images.length) {
             gallery.textContent = 'No past generations yet.';
             return;
         }
 
+        // Match archive images to generation events by close timestamp
+        const genEvents = events.filter(e => e.type === 'generated');
+
         gallery.innerHTML = `
             <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
-                ${images.map((img: ArchiveImage) => `
+                ${images.map((img: ArchiveImage) => {
+                    // Match: this archive was created when a generation started — find the gen event
+                    // whose output this archive represents (the gen BEFORE the archive timestamp)
+                    const archiveTs = img.timestamp.replace(/-/g, (m: string, o: number) => o > 9 ? ':' : '-');
+                    const archiveTime = new Date(archiveTs).getTime();
+                    const matchedEvent = genEvents.find((e, idx) => {
+                        const nextGen = idx < genEvents.length - 1 ? genEvents[idx + 1] : null;
+                        if (!nextGen) return false;
+                        const nextGenTime = nextGen.at.getTime();
+                        return Math.abs(archiveTime - nextGenTime) < 300000;
+                    });
+                    const modelLabel = matchedEvent?.model || '';
+                    const date = img.timestamp.split('T')[0] || 'Unknown';
+                    return `
                     <div class="border border-gray-200 rounded-lg overflow-hidden">
-                        <img src="${img.url}" class="w-full aspect-[3/2] object-cover cursor-pointer" onclick="window.open('${img.url}', '_blank')" loading="lazy">
+                        <img src="${img.url}" class="w-full aspect-[3/2] object-cover cursor-zoom-in lb-img" data-full="${img.url}" loading="lazy">
                         <div class="p-2">
-                            <p class="text-xs text-gray-400">${img.timestamp.split('T')[0] || 'Unknown'}</p>
+                            <p class="text-xs text-gray-400">${date}${modelLabel ? ` · ${modelLabel}` : ''}</p>
                             <button class="assign-archive-btn w-full mt-1 py-1 text-xs font-medium bg-blue-50 text-blue-700 rounded hover:bg-blue-100" data-recipe-id="${recipeId}" data-archive-path="${img.path}">Use This</button>
                         </div>
-                    </div>
-                `).join('')}
+                    </div>`;
+                }).join('')}
             </div>
         `;
 
@@ -520,10 +795,13 @@ async function loadArchiveGallery(recipeId: string) {
                 (btn as HTMLButtonElement).disabled = true;
                 try {
                     const result = await assignArchiveImage(rid, path);
+                    repointCover(rid, result.coverPath);
                     const aiContainer = document.getElementById('ai-img-container');
                     if (aiContainer) {
-                        aiContainer.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${result.downloadUrl}', '_blank')">`;
+                        aiContainer.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${result.downloadUrl}">`;
                     }
+                    imageVersions.set(rid, (imageVersions.get(rid) || 0) + 1);
+                    renderGrid();
                     (btn as HTMLButtonElement).textContent = 'Assigned!';
                 } catch (err: any) {
                     (btn as HTMLButtonElement).textContent = 'Failed';
@@ -554,11 +832,12 @@ async function loadTimeline(recipeId: string) {
                     return `<div class="flex gap-2 items-start">
                         <span class="text-purple-500 shrink-0 mt-0.5">&#x1f3a8;</span>
                         <div class="flex-1">
-                            <span class="font-medium text-gray-700">${name}</span> <span class="text-gray-400">generated</span>
+                            <span class="font-medium text-gray-700">${name}</span> <span class="text-gray-400">${e.stepNumber ? `Step ${e.stepNumber}: ` : ''}generated${e.model ? ` with ${e.model}` : ''}${e.usedReference ? ' + ref' : ''}</span>
+                            ${e.cost ? `<span class="text-purple-400 text-xs ml-1">$${e.cost.toFixed(3)}</span>` : ''}
                             <span class="text-gray-400 text-xs ml-1">${date} ${time}</span>
                             ${e.feedback ? `<div class="text-xs text-gray-500 mt-0.5">Feedback: "${e.feedback}"</div>` : ''}
                             ${e.prompt ? `<details class="mt-1"><summary class="text-xs text-purple-500 cursor-pointer">View prompt</summary><div class="text-xs font-mono text-gray-500 mt-1 bg-white rounded p-2">${e.prompt}</div></details>` : ''}
-                            ${e.imageUrl ? `<img src="${e.imageUrl}" class="mt-1 w-24 h-16 object-cover rounded cursor-pointer" onclick="window.open('${e.imageUrl}', '_blank')">` : ''}
+                            ${e.imageUrl ? `<img src="${e.imageUrl}" class="mt-1 w-24 h-16 object-cover rounded cursor-zoom-in lb-img" data-full="${e.imageUrl}">` : ''}
                         </div>
                     </div>`;
                 case 'feedback':
@@ -591,6 +870,49 @@ async function loadTimeline(recipeId: string) {
                         <span class="font-medium text-gray-700">${name}</span> <span class="text-gray-400">assigned archived image</span>
                         <span class="text-gray-400 text-xs ml-1">${date} ${time}</span>
                     </div>`;
+                case 'audited': {
+                    const c = e.changes || {};
+                    const ing = c.ingredients || {};
+                    const dir = c.directions || {};
+                    const diffRows: string[] = [];
+                    const escape = (s: any) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    if (c.name && c.name.before !== c.name.after) {
+                        diffRows.push(`<div class="text-xs"><span class="text-gray-500">Name:</span> <span class="line-through text-red-500">${escape(c.name.before)}</span> &rarr; <span class="text-green-600">${escape(c.name.after)}</span></div>`);
+                    }
+                    if (c.description && c.description.before !== c.description.after) {
+                        diffRows.push(`<div class="text-xs"><div class="text-gray-500">Description:</div><div class="line-through text-red-500 whitespace-pre-wrap">${escape(c.description.before)}</div><div class="text-green-600 whitespace-pre-wrap">${escape(c.description.after)}</div></div>`);
+                    }
+                    if (c.calories && c.calories.before !== c.calories.after) {
+                        diffRows.push(`<div class="text-xs"><span class="text-gray-500">Calories:</span> <span class="line-through text-red-500">${escape(c.calories.before)}</span> &rarr; <span class="text-green-600">${escape(c.calories.after)}</span></div>`);
+                    }
+                    const ingParts: string[] = [];
+                    if (ing.added?.length) ingParts.push(`<div class="text-xs text-green-600">+ ${ing.added.length} ingredient(s): ${ing.added.map(a => escape(a.name)).join(', ')}</div>`);
+                    if (ing.removed?.length) ingParts.push(`<div class="text-xs text-red-500">&minus; ${ing.removed.length} ingredient(s): ${ing.removed.map(a => escape(a.name)).join(', ')}</div>`);
+                    if (ing.changed?.length) ingParts.push(`<div class="text-xs text-orange-600">~ ${ing.changed.length} ingredient(s) changed: ${ing.changed.map(a => escape(a.name) + ' (' + escape(a.before) + ' &rarr; ' + escape(a.after) + ')').join(', ')}</div>`);
+                    if (ing.linked) ingParts.push(`<div class="text-xs text-blue-600">&#x1f517; ${ing.linked} ingredient(s) linked to catalog</div>`);
+                    const dirParts: string[] = [];
+                    if (dir.added) dirParts.push(`+${dir.added}`);
+                    if (dir.removed) dirParts.push(`-${dir.removed}`);
+                    if (dir.changed) dirParts.push(`~${dir.changed}`);
+                    if (dirParts.length) ingParts.push(`<div class="text-xs text-gray-600">Directions: ${dirParts.join(' ')}</div>`);
+                    const sourceLabel = e.source === 'manual' ? 'manually edited' : `audited${e.model ? ` with ${e.model}` : ''}`;
+                    return `<div class="flex gap-2 items-start">
+                        <span class="text-orange-500 shrink-0 mt-0.5">&#x1f4dd;</span>
+                        <div class="flex-1">
+                            <span class="font-medium text-gray-700">${name}</span> <span class="text-gray-400">${sourceLabel}</span>
+                            ${e.cost ? `<span class="text-orange-400 text-xs ml-1">$${e.cost.toFixed(3)}</span>` : ''}
+                            <span class="text-gray-400 text-xs ml-1">${date} ${time}</span>
+                            <details open class="mt-1">
+                                <summary class="text-xs text-orange-500 cursor-pointer">View changes</summary>
+                                <div class="mt-1 bg-white rounded p-2 space-y-1">
+                                    ${diffRows.join('')}
+                                    ${ingParts.join('')}
+                                    ${e.pdfUrl ? `<div class="text-xs mt-1"><a href="${e.pdfUrl}" target="_blank" class="text-blue-600 hover:underline">View source PDF</a></div>` : ''}
+                                </div>
+                            </details>
+                        </div>
+                    </div>`;
+                }
                 default:
                     return '';
             }
@@ -630,9 +952,32 @@ function exportApproved() {
 }
 
 document.addEventListener('keydown', (e) => {
+    if (lightboxIsOpen()) {
+        if (e.key === 'Escape') closeLightbox();
+        if (e.key === 'ArrowLeft') stepLightbox(-1);
+        if (e.key === 'ArrowRight') stepLightbox(1);
+        return;
+    }
     if (currentModalIndex >= 0) {
         if (e.key === 'Escape') closeModal();
         if (e.key === 'ArrowLeft') navigateModal(-1);
         if (e.key === 'ArrowRight') navigateModal(1);
     }
 });
+
+// ---------------------------------------------------------------------------
+// Cover path refresh
+// ---------------------------------------------------------------------------
+
+/** A regenerate or Use This can move the cover (an app-made .webp becomes a jpg in images/). */
+function repointCover(recipeId: string, coverPath: string | undefined) {
+    if (!coverPath) return;
+    const r = recipes.find(x => x.id === recipeId);
+    if (!r) return;
+    const others = r.assets.filter(a => a.context !== 'cover');
+    r.assets = [...others, { type: 'image/jpeg', context: 'cover', url: coverPath } as Recipe['assets'][number]];
+}
+
+function regenCost(model: string): string {
+    return ({ 'flux-3-image': '$0.15', 'flux-1.1-pro': '$0.04', 'flux-2-pro': '$0.05', 'flux-schnell': '$0.003' } as Record<string, string>)[model] || '$0.15';
+}

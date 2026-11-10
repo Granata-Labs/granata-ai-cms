@@ -1,5 +1,5 @@
 import { collection, getDocs, addDoc, doc, setDoc, deleteDoc, onSnapshot, orderBy, query, where, serverTimestamp, Unsubscribe } from 'firebase/firestore';
-import { ref, getDownloadURL } from 'firebase/storage';
+import { ref, getDownloadURL, uploadBytes } from 'firebase/storage';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { db, storage } from './firebase-config';
 import { getCurrentUser } from './auth';
@@ -42,8 +42,8 @@ export async function loadRecipes(): Promise<Recipe[]> {
         description: d.data().description || '',
         proteinName: d.data().proteinName || undefined,
         calories: d.data().calories || undefined,
-        ingredients: (d.data().ingredients || []).map((i: any) => ({ name: i.name, quantity: i.quantity })),
-        directions: (d.data().directions || []).map((dir: any) => ({ step: dir.step, description: dir.description })),
+        ingredients: (d.data().ingredients || []).map((i: any) => ({ id: i.id, name: i.name, quantity: i.quantity })),
+        directions: (d.data().directions || []).map((dir: any) => ({ step: dir.step, description: dir.description, imagePrompt: dir.imagePrompt })),
         assets: d.data().assets || [],
     }));
 }
@@ -62,13 +62,14 @@ export async function setReview(recipeId: string, status: 'approved' | 'flagged'
         reviewedAt: serverTimestamp(),
     }, { merge: true });
     // Log event
-    await addDoc(collection(db, 'recipe-events'), {
+    const eventData: Record<string, any> = {
         recipeId,
         type: status,
         by: user.email,
         at: serverTimestamp(),
-        notes: notes || undefined,
-    });
+    };
+    if (notes) eventData.notes = notes;
+    await addDoc(collection(db, 'recipe-events'), eventData);
 }
 
 export async function clearReview(recipeId: string) {
@@ -103,8 +104,33 @@ export async function loadRecipeEvents(recipeId: string): Promise<RecipeEvent[]>
             notes: data.notes,
             imageUrl: data.imageUrl,
             archivePath: data.archivePath,
+            model: data.model,
+            usedReference: data.usedReference,
+            cost: data.cost,
+            changes: data.changes,
+            pdfUrl: data.pdfUrl,
+            source: data.source,
+            stepNumber: data.stepNumber,
         };
     });
+}
+
+export async function regenStepImage(
+    recipeId: string,
+    stepNumber: number,
+    feedback?: string,
+    promptMode?: 'tweak' | 'overwrite',
+    model?: string,
+    useReference?: boolean,
+    extraReferenceUrls?: string[],
+): Promise<{ downloadUrl: string; prompt: string; model: string; stepNumber: number }> {
+    const fn = httpsCallable<
+        { recipeId: string; stepNumber: number; feedback?: string; promptMode?: 'tweak' | 'overwrite'; model?: string; useReference?: boolean; extraReferenceUrls?: string[] },
+        { success: boolean; downloadUrl: string; prompt: string; model: string; stepNumber: number }
+    >(functions, 'aiRegenStepImage');
+    const result = await fn({ recipeId, stepNumber, feedback, promptMode, model, useReference, extraReferenceUrls });
+    clearUrlCache(recipeId);
+    return result.data;
 }
 
 export function subscribeToReviews(callback: (reviews: Map<string, RecipeReview>) => void): Unsubscribe {
@@ -129,9 +155,16 @@ export function subscribeToReviews(callback: (reviews: Map<string, RecipeReview>
     });
 }
 
-export async function regenRecipeImage(recipeId: string, feedback?: string): Promise<{ downloadUrl: string; prompt: string; visualDescription: string }> {
-    const fn = httpsCallable<{ recipeId: string; feedback?: string }, { downloadUrl: string; prompt: string; visualDescription: string }>(functions, 'aiRegenRecipeImage');
-    const result = await fn({ recipeId, feedback });
+export async function uploadExtraReference(recipeId: string, file: File, index: number, namespace = 'cover'): Promise<string> {
+    const storagePath = `recipes/${recipeId}/images/_temp/${namespace}-extra-reference-${index}.jpg`;
+    const storageRef = ref(storage, storagePath);
+    await uploadBytes(storageRef, file, { contentType: file.type });
+    return storagePath;
+}
+
+export async function regenRecipeImage(recipeId: string, feedback?: string, model?: string, useReference?: boolean, extraReferenceUrls?: string[]): Promise<{ downloadUrl: string; prompt: string; visualDescription: string; model: string; coverPath?: string }> {
+    const fn = httpsCallable<{ recipeId: string; feedback?: string; model?: string; useReference?: boolean; extraReferenceUrls?: string[] }, { downloadUrl: string; prompt: string; visualDescription: string; model: string; coverPath?: string }>(functions, 'aiRegenRecipeImage');
+    const result = await fn({ recipeId, feedback, model, useReference, extraReferenceUrls });
     clearUrlCache(recipeId);
     // Log who generated it on the review doc
     const user = getCurrentUser();
@@ -154,8 +187,8 @@ export async function listArchiveImages(recipeId: string): Promise<ArchiveImage[
     return result.data.images;
 }
 
-export async function assignArchiveImage(recipeId: string, archivePath: string): Promise<{ downloadUrl: string }> {
-    const fn = httpsCallable<{ recipeId: string; archivePath: string }, { downloadUrl: string }>(functions, 'aiAssignArchiveImage');
+export async function assignArchiveImage(recipeId: string, archivePath: string): Promise<{ downloadUrl: string; coverPath?: string }> {
+    const fn = httpsCallable<{ recipeId: string; archivePath: string }, { downloadUrl: string; coverPath?: string }>(functions, 'aiAssignArchiveImage');
     const result = await fn({ recipeId, archivePath });
     clearUrlCache(recipeId);
     return result.data;
