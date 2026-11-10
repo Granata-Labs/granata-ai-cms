@@ -2,6 +2,7 @@ import './style.css';
 import { initAuth, setAuthChangeHandler, signInWithGoogle, logOut, getCurrentUser } from './auth';
 import { loadRecipes, subscribeToReviews, setReview, clearReview, clearUrlCache, addFeedback, loadRecipeEvents, getImageUrl, getArchiveImageUrl, regenRecipeImage, regenStepImage, uploadExtraReference, listArchiveImages, assignArchiveImage } from './firestore';
 import type { Recipe, RecipeReview, RecipeEvent, FilterType, ArchiveImage } from './types';
+import { lightboxIsOpen, closeLightbox, stepLightbox } from './lightbox';
 import type { User } from 'firebase/auth';
 
 let recipes: Recipe[] = [];
@@ -368,6 +369,7 @@ async function openModal(idx: number) {
                     <textarea id="feedback-input" placeholder="Add feedback (e.g., 'make the bun brioche', 'should be flat tostadas')" rows="2" class="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm resize-none">${prevFeedback}</textarea>
                     <div class="flex gap-2 items-center flex-wrap">
                         <select id="model-select" class="px-2 py-1.5 border border-gray-200 rounded-lg text-xs bg-white">
+                            <option value="flux-3-image" selected>FLUX 3 (~$0.15)</option>
                             <option value="flux-2-pro">FLUX 2 Pro (~$0.05)</option>
                             <option value="flux-1.1-pro">FLUX 1.1 Pro (~$0.04)</option>
                             <option value="flux-schnell">FLUX Schnell (~$0.003)</option>
@@ -384,7 +386,7 @@ async function openModal(idx: number) {
                     <div class="flex gap-2">
                         <button id="send-feedback-btn" class="px-4 py-2 rounded-lg text-sm font-medium bg-gray-200 text-gray-700 hover:bg-gray-300">Send Feedback</button>
                         <button id="regen-btn" class="flex-1 py-2 rounded-lg text-sm font-medium bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed">
-                            Regenerate (~$0.05)
+                            Regenerate (~$0.15)
                         </button>
                     </div>
                     <div id="regen-status" class="hidden text-sm text-purple-600 flex items-center gap-2">
@@ -484,14 +486,14 @@ async function openModal(idx: number) {
     if (coverPath) {
         getImageUrl(coverPath).then(url => {
             const c = document.getElementById('ai-img-container')!;
-            if (url) c.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${url}', '_blank')">`;
+            if (url) c.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${url}">`;
             else c.textContent = 'Not available';
         });
         const archiveCoverPath = (coverPath.startsWith('/') ? coverPath.substring(1) : coverPath).replace('/images/', '/images/_archive/');
         getArchiveImageUrl(coverPath).then(url => {
             const c = document.getElementById('original-img-container')!;
             if (url) {
-                c.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${url}', '_blank')">`;
+                c.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${url}">`;
                 // Show "Use Original" button
                 const btn = document.getElementById('use-original-btn')!;
                 btn.classList.remove('hidden');
@@ -501,7 +503,7 @@ async function openModal(idx: number) {
                     try {
                         const result = await assignArchiveImage(r.id, archiveCoverPath);
                         const aiC = document.getElementById('ai-img-container');
-                        if (aiC) aiC.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${result.downloadUrl}', '_blank')">`;
+                        if (aiC) aiC.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${result.downloadUrl}">`;
                         btn.textContent = 'Original Restored';
                         imageVersions.set(r.id, (imageVersions.get(r.id) || 0) + 1);
                         renderGrid();
@@ -522,7 +524,7 @@ async function openModal(idx: number) {
     }
 
     // Model select — update cost on button
-    const costs: Record<string, string> = { 'flux-1.1-pro': '$0.04', 'flux-2-pro': '$0.05', 'flux-schnell': '$0.003' };
+    const costs: Record<string, string> = { 'flux-3-image': '$0.15', 'flux-1.1-pro': '$0.04', 'flux-2-pro': '$0.05', 'flux-schnell': '$0.003' };
     document.getElementById('model-select')?.addEventListener('change', (e) => {
         const model = (e.target as HTMLSelectElement).value;
         const btn = document.getElementById('regen-btn');
@@ -623,7 +625,7 @@ async function loadStepThumbnail(recipeId: string, stepNumber: number) {
         isOriginal = !!url;
     }
     if (url) {
-        container.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${url}', '_blank')">${isOriginal ? '<div class="absolute top-1 left-1 text-[9px] px-1.5 py-0.5 bg-black/60 text-white rounded">Original</div>' : ''}`;
+        container.innerHTML = `<img src="${url}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${url}">${isOriginal ? '<div class="absolute top-1 left-1 text-[9px] px-1.5 py-0.5 bg-black/60 text-white rounded">Original</div>' : ''}`;
         container.classList.add('relative');
     } else {
         container.textContent = 'No step image';
@@ -656,7 +658,7 @@ async function handleStepRegen(recipeId: string, stepNumber: number) {
             );
         }
         const result = await regenStepImage(recipeId, stepNumber, feedback || undefined, promptMode, model, useReference, extraReferenceUrls);
-        container.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${result.downloadUrl}', '_blank')">`;
+        container.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${result.downloadUrl}">`;
         container.classList.add('relative');
         status.classList.add('hidden');
         btn.disabled = false;
@@ -682,7 +684,7 @@ async function handleRegen(recipeId: string) {
     const error = document.getElementById('regen-error')!;
     const aiContainer = document.getElementById('ai-img-container')!;
     const feedback = (document.getElementById('feedback-input') as HTMLTextAreaElement)?.value || '';
-    const model = (document.getElementById('model-select') as HTMLSelectElement)?.value || 'flux-1.1-pro';
+    const model = (document.getElementById('model-select') as HTMLSelectElement)?.value || 'flux-3-image';
     const useReference = (document.getElementById('use-reference') as HTMLInputElement)?.checked || false;
     const extraRefFiles = (document.getElementById('extra-reference') as HTMLInputElement)?.files;
 
@@ -708,9 +710,10 @@ async function handleRegen(recipeId: string) {
         }
 
         const result = await regenRecipeImage(recipeId, feedback || undefined, model, useReference, extraReferenceUrls);
+        repointCover(recipeId, result.coverPath);
 
         // Show new image and update grid
-        aiContainer.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${result.downloadUrl}', '_blank')">`;
+        aiContainer.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${result.downloadUrl}">`;
         imageVersions.set(recipeId, (imageVersions.get(recipeId) || 0) + 1);
         renderGrid();
 
@@ -719,12 +722,12 @@ async function handleRegen(recipeId: string) {
         loadArchiveGallery(recipeId);
 
         status.classList.add('hidden');
-        btn.textContent = 'Regenerate Again (~$0.04)';
+        btn.textContent = `Regenerate Again (~${regenCost(model)})`;
     } catch (err: any) {
         error.textContent = err.message || 'Generation failed. Check Replicate credits.';
         error.classList.remove('hidden');
         status.classList.add('hidden');
-        btn.textContent = 'Regenerate Image (~$0.04)';
+        btn.textContent = `Regenerate (~${regenCost(model)})`;
 
         // Restore previous image
         const r = recipes.find(r => r.id === recipeId);
@@ -773,7 +776,7 @@ async function loadArchiveGallery(recipeId: string) {
                     const date = img.timestamp.split('T')[0] || 'Unknown';
                     return `
                     <div class="border border-gray-200 rounded-lg overflow-hidden">
-                        <img src="${img.url}" class="w-full aspect-[3/2] object-cover cursor-pointer" onclick="window.open('${img.url}', '_blank')" loading="lazy">
+                        <img src="${img.url}" class="w-full aspect-[3/2] object-cover cursor-zoom-in lb-img" data-full="${img.url}" loading="lazy">
                         <div class="p-2">
                             <p class="text-xs text-gray-400">${date}${modelLabel ? ` · ${modelLabel}` : ''}</p>
                             <button class="assign-archive-btn w-full mt-1 py-1 text-xs font-medium bg-blue-50 text-blue-700 rounded hover:bg-blue-100" data-recipe-id="${recipeId}" data-archive-path="${img.path}">Use This</button>
@@ -792,9 +795,10 @@ async function loadArchiveGallery(recipeId: string) {
                 (btn as HTMLButtonElement).disabled = true;
                 try {
                     const result = await assignArchiveImage(rid, path);
+                    repointCover(rid, result.coverPath);
                     const aiContainer = document.getElementById('ai-img-container');
                     if (aiContainer) {
-                        aiContainer.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-pointer" onclick="window.open('${result.downloadUrl}', '_blank')">`;
+                        aiContainer.innerHTML = `<img src="${result.downloadUrl}" class="w-full h-full object-cover cursor-zoom-in lb-img" data-full="${result.downloadUrl}">`;
                     }
                     imageVersions.set(rid, (imageVersions.get(rid) || 0) + 1);
                     renderGrid();
@@ -833,7 +837,7 @@ async function loadTimeline(recipeId: string) {
                             <span class="text-gray-400 text-xs ml-1">${date} ${time}</span>
                             ${e.feedback ? `<div class="text-xs text-gray-500 mt-0.5">Feedback: "${e.feedback}"</div>` : ''}
                             ${e.prompt ? `<details class="mt-1"><summary class="text-xs text-purple-500 cursor-pointer">View prompt</summary><div class="text-xs font-mono text-gray-500 mt-1 bg-white rounded p-2">${e.prompt}</div></details>` : ''}
-                            ${e.imageUrl ? `<img src="${e.imageUrl}" class="mt-1 w-24 h-16 object-cover rounded cursor-pointer" onclick="window.open('${e.imageUrl}', '_blank')">` : ''}
+                            ${e.imageUrl ? `<img src="${e.imageUrl}" class="mt-1 w-24 h-16 object-cover rounded cursor-zoom-in lb-img" data-full="${e.imageUrl}">` : ''}
                         </div>
                     </div>`;
                 case 'feedback':
@@ -948,9 +952,32 @@ function exportApproved() {
 }
 
 document.addEventListener('keydown', (e) => {
+    if (lightboxIsOpen()) {
+        if (e.key === 'Escape') closeLightbox();
+        if (e.key === 'ArrowLeft') stepLightbox(-1);
+        if (e.key === 'ArrowRight') stepLightbox(1);
+        return;
+    }
     if (currentModalIndex >= 0) {
         if (e.key === 'Escape') closeModal();
         if (e.key === 'ArrowLeft') navigateModal(-1);
         if (e.key === 'ArrowRight') navigateModal(1);
     }
 });
+
+// ---------------------------------------------------------------------------
+// Cover path refresh
+// ---------------------------------------------------------------------------
+
+/** A regenerate or Use This can move the cover (an app-made .webp becomes a jpg in images/). */
+function repointCover(recipeId: string, coverPath: string | undefined) {
+    if (!coverPath) return;
+    const r = recipes.find(x => x.id === recipeId);
+    if (!r) return;
+    const others = r.assets.filter(a => a.context !== 'cover');
+    r.assets = [...others, { type: 'image/jpeg', context: 'cover', url: coverPath } as Recipe['assets'][number]];
+}
+
+function regenCost(model: string): string {
+    return ({ 'flux-3-image': '$0.15', 'flux-1.1-pro': '$0.04', 'flux-2-pro': '$0.05', 'flux-schnell': '$0.003' } as Record<string, string>)[model] || '$0.15';
+}

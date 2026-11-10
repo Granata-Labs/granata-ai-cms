@@ -162,8 +162,8 @@ export async function uploadExtraReference(recipeId: string, file: File, index: 
     return storagePath;
 }
 
-export async function regenRecipeImage(recipeId: string, feedback?: string, model?: string, useReference?: boolean, extraReferenceUrls?: string[]): Promise<{ downloadUrl: string; prompt: string; visualDescription: string; model: string }> {
-    const fn = httpsCallable<{ recipeId: string; feedback?: string; model?: string; useReference?: boolean; extraReferenceUrls?: string[] }, { downloadUrl: string; prompt: string; visualDescription: string; model: string }>(functions, 'aiRegenRecipeImage');
+export async function regenRecipeImage(recipeId: string, feedback?: string, model?: string, useReference?: boolean, extraReferenceUrls?: string[]): Promise<{ downloadUrl: string; prompt: string; visualDescription: string; model: string; coverPath?: string }> {
+    const fn = httpsCallable<{ recipeId: string; feedback?: string; model?: string; useReference?: boolean; extraReferenceUrls?: string[] }, { downloadUrl: string; prompt: string; visualDescription: string; model: string; coverPath?: string }>(functions, 'aiRegenRecipeImage');
     const result = await fn({ recipeId, feedback, model, useReference, extraReferenceUrls });
     clearUrlCache(recipeId);
     // Log who generated it on the review doc
@@ -187,8 +187,8 @@ export async function listArchiveImages(recipeId: string): Promise<ArchiveImage[
     return result.data.images;
 }
 
-export async function assignArchiveImage(recipeId: string, archivePath: string): Promise<{ downloadUrl: string }> {
-    const fn = httpsCallable<{ recipeId: string; archivePath: string }, { downloadUrl: string }>(functions, 'aiAssignArchiveImage');
+export async function assignArchiveImage(recipeId: string, archivePath: string): Promise<{ downloadUrl: string; coverPath?: string }> {
+    const fn = httpsCallable<{ recipeId: string; archivePath: string }, { downloadUrl: string; coverPath?: string }>(functions, 'aiAssignArchiveImage');
     const result = await fn({ recipeId, archivePath });
     clearUrlCache(recipeId);
     return result.data;
