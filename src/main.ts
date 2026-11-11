@@ -374,6 +374,11 @@ async function openModal(idx: number) {
                             <option value="flux-1.1-pro">FLUX 1.1 Pro (~$0.04)</option>
                             <option value="flux-schnell">FLUX Schnell (~$0.003)</option>
                         </select>
+                        <select id="describer-select" title="The Claude that writes the dish description FLUX draws from" class="px-2 py-1.5 border border-gray-200 rounded-lg text-xs bg-white">
+                            <option value="claude-haiku-4-5" selected>Described by Claude Haiku 4.5 (~$0.001)</option>
+                            <option value="claude-sonnet-5-5">Described by Claude Sonnet 5.5 (~$0.01)</option>
+                            <option value="claude-opus-5-5">Described by Claude Opus 5.5 (~$0.02)</option>
+                        </select>
                         <label class="flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer">
                             <input type="checkbox" id="use-reference" class="rounded"> Use original as reference
                         </label>
@@ -693,6 +698,7 @@ async function handleRegen(recipeId: string) {
     const feedback = (document.getElementById('feedback-input') as HTMLTextAreaElement)?.value || '';
     const model = (document.getElementById('model-select') as HTMLSelectElement)?.value || 'flux-3-image';
     const useReference = (document.getElementById('use-reference') as HTMLInputElement)?.checked || false;
+    const describer = (document.getElementById('describer-select') as HTMLSelectElement)?.value || undefined;
     const extraRefFiles = (document.getElementById('extra-reference') as HTMLInputElement)?.files;
 
     btn.disabled = true;
@@ -716,7 +722,7 @@ async function handleRegen(recipeId: string) {
             );
         }
 
-        const result = await regenRecipeImage(recipeId, feedback || undefined, model, useReference, extraReferenceUrls);
+        const result = await regenRecipeImage(recipeId, feedback || undefined, model, useReference, extraReferenceUrls, describer);
         repointCover(recipeId, result.coverPath);
 
         // Show new image and update grid
@@ -863,7 +869,7 @@ async function loadTimeline(recipeId: string) {
                     return `<div class="flex gap-2 items-start">
                         <span class="text-purple-500 shrink-0 mt-0.5">&#x1f3a8;</span>
                         <div class="flex-1">
-                            <span class="font-medium text-gray-700">${name}</span> <span class="text-gray-400">${e.stepNumber ? `Step ${e.stepNumber}: ` : ''}generated${e.model ? ` with ${e.model}` : ''}${e.usedReference ? ' + ref' : ''}</span>
+                            <span class="font-medium text-gray-700">${name}</span> <span class="text-gray-400">${e.stepNumber ? `Step ${e.stepNumber}: ` : ''}generated${e.model ? ` with ${e.model}` : ''}${e.describer ? `, described by ${e.describer}` : ''}${e.usedReference ? ' + ref' : ''}</span>
                             ${e.cost ? `<span class="text-purple-400 text-xs ml-1">$${e.cost.toFixed(3)}</span>` : ''}
                             <span class="text-gray-400 text-xs ml-1">${date} ${time}</span>
                             ${e.feedback ? `<div class="text-xs text-gray-500 mt-0.5">Feedback: "${e.feedback}"</div>` : ''}

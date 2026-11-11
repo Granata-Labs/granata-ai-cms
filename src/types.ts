@@ -80,6 +80,8 @@ export interface RecipeEvent {
     imageUrl?: string;
     archivePath?: string;
     model?: string;
+    /** The Claude that wrote the dish description, when the CMS chose one. */
+    describer?: string;
     usedReference?: boolean;
     cost?: number;
     changes?: RecipeAuditChanges;

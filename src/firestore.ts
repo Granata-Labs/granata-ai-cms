@@ -105,6 +105,7 @@ export async function loadRecipeEvents(recipeId: string): Promise<RecipeEvent[]>
             imageUrl: data.imageUrl,
             archivePath: data.archivePath,
             model: data.model,
+            describer: data.describer,
             usedReference: data.usedReference,
             cost: data.cost,
             changes: data.changes,
@@ -162,9 +163,9 @@ export async function uploadExtraReference(recipeId: string, file: File, index: 
     return storagePath;
 }
 
-export async function regenRecipeImage(recipeId: string, feedback?: string, model?: string, useReference?: boolean, extraReferenceUrls?: string[]): Promise<{ downloadUrl: string; prompt: string; visualDescription: string; model: string; coverPath?: string }> {
-    const fn = httpsCallable<{ recipeId: string; feedback?: string; model?: string; useReference?: boolean; extraReferenceUrls?: string[] }, { downloadUrl: string; prompt: string; visualDescription: string; model: string; coverPath?: string }>(functions, 'aiRegenRecipeImage');
-    const result = await fn({ recipeId, feedback, model, useReference, extraReferenceUrls });
+export async function regenRecipeImage(recipeId: string, feedback?: string, model?: string, useReference?: boolean, extraReferenceUrls?: string[], describer?: string): Promise<{ downloadUrl: string; prompt: string; visualDescription: string; model: string; coverPath?: string; describer?: string | null }> {
+    const fn = httpsCallable<{ recipeId: string; feedback?: string; model?: string; useReference?: boolean; extraReferenceUrls?: string[]; describer?: string }, { downloadUrl: string; prompt: string; visualDescription: string; model: string; coverPath?: string; describer?: string | null }>(functions, 'aiRegenRecipeImage');
+    const result = await fn({ recipeId, feedback, model, useReference, extraReferenceUrls, describer });
     clearUrlCache(recipeId);
     // Log who generated it on the review doc
     const user = getCurrentUser();
